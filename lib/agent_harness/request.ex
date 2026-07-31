@@ -5,8 +5,15 @@ defmodule AgentHarness.Request do
 
   alias AgentHarness.ID
 
-  @type kind :: :question | :permission | :confirmation | :mcp_elicitation
-  @type status :: :pending | :resolved
+  @type kind ::
+          :question
+          | :command_approval
+          | :file_change_approval
+          | :permission
+          | :confirmation
+          | :mcp_elicitation
+
+  @type status :: :pending | :resolved | :expired
 
   @enforce_keys [
     :id,
@@ -25,10 +32,13 @@ defmodule AgentHarness.Request do
     :kind,
     :prompt,
     :choices,
+    :questions,
     :provider_ref,
     :status,
     :deadline,
+    :schema,
     :metadata,
+    :created_at,
     :response
   ]
 
@@ -37,12 +47,15 @@ defmodule AgentHarness.Request do
           session_id: String.t(),
           turn_id: String.t(),
           kind: kind(),
-          prompt: String.t(),
+          prompt: String.t() | nil,
           choices: [map()],
+          questions: [map()],
           provider_ref: term(),
           status: status(),
           deadline: DateTime.t() | nil,
-          metadata: map() | nil,
+          schema: map() | nil,
+          metadata: map(),
+          created_at: DateTime.t(),
           response: term()
         }
 
@@ -54,12 +67,15 @@ defmodule AgentHarness.Request do
       session_id: Keyword.fetch!(opts, :session_id),
       turn_id: Keyword.fetch!(opts, :turn_id),
       kind: Keyword.fetch!(opts, :kind),
-      prompt: Keyword.fetch!(opts, :prompt),
+      prompt: Keyword.get(opts, :prompt),
       choices: Keyword.get(opts, :choices, []),
+      questions: Keyword.get(opts, :questions, []),
       provider_ref: Keyword.fetch!(opts, :provider_ref),
       status: :pending,
       deadline: Keyword.get(opts, :deadline),
-      metadata: Keyword.get(opts, :metadata)
+      schema: Keyword.get(opts, :schema),
+      metadata: Keyword.get(opts, :metadata, %{}),
+      created_at: Keyword.get_lazy(opts, :created_at, &DateTime.utc_now/0)
     }
   end
 end

@@ -8,12 +8,11 @@ defmodule AgentHarness.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      # Starts a worker by calling: AgentHarness.Worker.start_link(arg)
-      # {AgentHarness.Worker, arg}
+      {Registry, keys: :unique, name: AgentHarness.SessionRegistry},
+      {DynamicSupervisor, strategy: :one_for_one, name: AgentHarness.SessionSupervisor},
+      {Task.Supervisor, name: AgentHarness.RunnerSupervisor}
     ]
 
-    # See https://hexdocs.pm/elixir/Supervisor.html
-    # for other strategies and supported options
     opts = [strategy: :one_for_one, name: AgentHarness.Supervisor]
     Supervisor.start_link(children, opts)
   end

@@ -7,7 +7,7 @@ defmodule AgentHarness.Store do
   by a session before making them visible to readers.
 
   Session snapshots are deliberately opaque. This keeps the persistence layer
-  independent of `AgentHarness.SessionServer`'s private state while allowing a
+  independent of the private session-process state while allowing a
   durable adapter to restore the public and provider identifiers it needs.
 
   Events are append-only. `events/3` uses an exclusive sequence cursor, so

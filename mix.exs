@@ -8,6 +8,7 @@ defmodule AgentHarness.MixProject do
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
+      docs: docs(),
       elixirc_paths: elixirc_paths(Mix.env()),
       aliases: aliases(),
       description: "Supervised Elixir sessions for local coding-agent harnesses"
@@ -39,6 +40,22 @@ defmodule AgentHarness.MixProject do
 
   defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_env), do: ["lib"]
+
+  defp docs do
+    guides = [
+      "docs/getting-started.md",
+      "docs/configuration.md",
+      "docs/lifecycle-and-events.md",
+      "docs/architecture.md",
+      "docs/testing.md"
+    ]
+
+    [
+      main: "readme",
+      extras: ["README.md" | guides],
+      groups_for_extras: [Guides: guides]
+    ]
+  end
 
   defp aliases do
     [

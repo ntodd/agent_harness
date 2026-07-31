@@ -28,6 +28,8 @@ defmodule AgentHarness.MixProject do
 
   defp deps do
     [
+      {:claude_code, "~> 0.36.5"},
+      {:codex_sdk, "~> 0.18.1"},
       {:mox, "~> 1.2", only: :test},
       {:stream_data, "~> 1.2", only: [:dev, :test]},
       {:ex_doc, "~> 0.38", only: :dev, runtime: false},

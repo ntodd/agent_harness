@@ -1,6 +1,8 @@
 defmodule AgentHarness.Internal.OwnedTask do
   @moduledoc false
 
+  @owner_key {__MODULE__, :owner}
+
   @typedoc false
   @type guardian :: pid()
 
@@ -21,7 +23,13 @@ defmodule AgentHarness.Internal.OwnedTask do
       supervisor,
       fn ->
         _guardian = arm(owner)
-        fun.()
+        Process.put(@owner_key, owner)
+
+        try do
+          fun.()
+        after
+          Process.delete(@owner_key)
+        end
       end,
       options
     )
@@ -35,6 +43,10 @@ defmodule AgentHarness.Internal.OwnedTask do
     raise ArgumentError,
           "expected task callback to be a zero-arity function, got: #{inspect(fun)}"
   end
+
+  @doc false
+  @spec owner() :: pid() | nil
+  def owner, do: Process.get(@owner_key)
 
   @doc false
   @spec arm(pid()) :: guardian()

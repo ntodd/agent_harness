@@ -16,6 +16,7 @@ defmodule AgentHarness.SessionServer do
   }
 
   alias AgentHarness.Provider.Sink
+  alias AgentHarness.Internal.OwnedTask
 
   defmodule CompletedTurnCache do
     @moduledoc false
@@ -49,6 +50,13 @@ defmodule AgentHarness.SessionServer do
       :open_task,
       :open_timer,
       :open_failure,
+      :startup_finalization_task,
+      :startup_finalization_timer,
+      :startup_replacement,
+      :startup_replacement_marker,
+      :startup_rollback_task,
+      :startup_rollback_timer,
+      :startup_failure,
       :current_turn,
       :provider_turn_ref,
       :turn_started_monotonic,
@@ -121,7 +129,7 @@ defmodule AgentHarness.SessionServer do
   @impl true
   def handle_continue({:open, reuse}, state) do
     task =
-      Task.Supervisor.async(AgentHarness.RunnerSupervisor, fn ->
+      OwnedTask.async_nolink(AgentHarness.RunnerSupervisor, fn ->
         with {:ok, replacement} <- reusable_session(state.store, state.session.id, reuse),
              {:ok, provider_handle, info} <-
                open_provider(state.provider, state.config, state.sink) do
@@ -337,16 +345,39 @@ defmodule AgentHarness.SessionServer do
     Process.demonitor(task.ref, [:flush])
     cancel_timer(state.open_timer)
     state = %{state | open_task: nil, open_timer: nil}
+    finish_provider_open_result(state, result)
+  end
 
-    case finish_provider_open(state, result) do
-      {:ok, state} ->
-        notify_starter(state, {:ok, self()})
-        {:noreply, state}
+  def handle_info(
+        {task_ref, result},
+        %State{startup_finalization_task: %Task{ref: task_ref} = task} = state
+      ) do
+    Process.demonitor(task.ref, [:flush])
+    cancel_timer(state.startup_finalization_timer)
 
-      {:error, reason, state} ->
-        notify_starter(state, {:error, reason})
-        {:stop, :normal, clear_starter(state)}
-    end
+    state = %{
+      state
+      | startup_finalization_task: nil,
+        startup_finalization_timer: nil
+    }
+
+    finish_startup_finalization(state, result)
+  end
+
+  def handle_info(
+        {task_ref, result},
+        %State{startup_rollback_task: %Task{ref: task_ref} = task} = state
+      ) do
+    Process.demonitor(task.ref, [:flush])
+    cancel_timer(state.startup_rollback_timer)
+
+    state = %{
+      state
+      | startup_rollback_task: nil,
+        startup_rollback_timer: nil
+    }
+
+    finish_startup_rollback(state, result)
   end
 
   def handle_info(
@@ -367,16 +398,51 @@ defmodule AgentHarness.SessionServer do
         {:provider_open_timeout, task_ref},
         %State{open_task: %Task{ref: task_ref} = task} = state
       ) do
-    _ = Task.shutdown(task, :brutal_kill)
-    notify_starter(state, {:error, :session_start_timeout})
+    state = %{state | open_task: nil, open_timer: nil}
 
-    {:stop, :normal,
-     state
-     |> clear_starter()
-     |> Map.merge(%{open_task: nil, open_timer: nil})}
+    case Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> finish_provider_open_result(state, result)
+      _not_completed -> stop_failed_startup(state, :session_start_timeout)
+    end
   end
 
   def handle_info({:provider_open_timeout, _stale_ref}, state), do: {:noreply, state}
+
+  def handle_info(
+        {:startup_finalization_timeout, task_ref},
+        %State{startup_finalization_task: %Task{ref: task_ref} = task} = state
+      ) do
+    state = %{
+      state
+      | startup_finalization_task: nil,
+        startup_finalization_timer: nil
+    }
+
+    case Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> finish_startup_finalization(state, result)
+      _not_completed -> fail_startup(state, :session_start_finalization_timeout)
+    end
+  end
+
+  def handle_info({:startup_finalization_timeout, _stale_ref}, state), do: {:noreply, state}
+
+  def handle_info(
+        {:startup_rollback_timeout, task_ref},
+        %State{startup_rollback_task: %Task{ref: task_ref} = task} = state
+      ) do
+    state = %{
+      state
+      | startup_rollback_task: nil,
+        startup_rollback_timer: nil
+    }
+
+    case Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> finish_startup_rollback(state, result)
+      _not_completed -> finish_startup_rollback(state, {:error, :rollback_timeout})
+    end
+  end
+
+  def handle_info({:startup_rollback_timeout, _stale_ref}, state), do: {:noreply, state}
 
   def handle_info(
         {:provider_turn_start_timeout, task_ref},
@@ -465,26 +531,29 @@ defmodule AgentHarness.SessionServer do
         {:agent_harness_provider, sink_ref, {:session_updated, attrs}},
         %State{sink: %Sink{ref: sink_ref}} = state
       ) do
-    if state.status == :opening do
+    if startup_in_progress?(state) do
       {:noreply, %{state | open_session_attrs: Map.merge(state.open_session_attrs, attrs)}}
     else
-      state =
-        case Map.fetch(attrs, :provider_session_id) do
-          {:ok, provider_session_id} -> %{state | provider_session_id: provider_session_id}
-          :error -> state
-        end
-
-      state = persist_session(state)
-      {:noreply, emit(state, nil, :session_updated, attrs)}
+      {:noreply, apply_session_update(state, attrs)}
     end
   end
+
+  def handle_info(
+        {:apply_startup_session_attrs, sink_ref, attrs},
+        %State{sink: %Sink{ref: sink_ref}} = state
+      ) do
+    {:noreply, apply_session_update(state, attrs)}
+  end
+
+  def handle_info({:apply_startup_session_attrs, _stale_ref, _attrs}, state),
+    do: {:noreply, state}
 
   def handle_info(
         {:agent_harness_provider, sink_ref, {:transport_down, reason}},
         %State{sink: %Sink{ref: sink_ref}} = state
       ) do
     cond do
-      state.status == :opening ->
+      startup_in_progress?(state) ->
         {:noreply, record_open_failure(state, reason)}
 
       turn_starting?(state) ->
@@ -515,6 +584,36 @@ defmodule AgentHarness.SessionServer do
 
   def handle_info(
         {:DOWN, monitor, :process, _pid, reason},
+        %State{startup_finalization_task: %Task{ref: monitor}} = state
+      ) do
+    cancel_timer(state.startup_finalization_timer)
+
+    state = %{
+      state
+      | startup_finalization_task: nil,
+        startup_finalization_timer: nil
+    }
+
+    fail_startup(state, {:session_start_finalization_task_down, reason})
+  end
+
+  def handle_info(
+        {:DOWN, monitor, :process, _pid, reason},
+        %State{startup_rollback_task: %Task{ref: monitor}} = state
+      ) do
+    cancel_timer(state.startup_rollback_timer)
+
+    state = %{
+      state
+      | startup_rollback_task: nil,
+        startup_rollback_timer: nil
+    }
+
+    finish_startup_rollback(state, {:error, {:rollback_task_down, reason}})
+  end
+
+  def handle_info(
+        {:DOWN, monitor, :process, _pid, reason},
         %State{turn_start_task: %Task{ref: monitor}} = state
       ) do
     cancel_timer(state.turn_start_timer)
@@ -536,10 +635,15 @@ defmodule AgentHarness.SessionServer do
       ) do
     state = %{state | provider_monitor: nil}
 
-    if turn_starting?(state) do
-      {:noreply, defer_provider_message(state, {:transport_down, reason})}
-    else
-      {:noreply, transport_down(state, reason)}
+    cond do
+      startup_in_progress?(state) ->
+        {:noreply, record_open_failure(state, reason)}
+
+      turn_starting?(state) ->
+        {:noreply, defer_provider_message(state, {:transport_down, reason})}
+
+      true ->
+        {:noreply, transport_down(state, reason)}
     end
   end
 
@@ -606,7 +710,7 @@ defmodule AgentHarness.SessionServer do
 
   def handle_info({:EXIT, _pid, reason}, state) do
     cond do
-      state.status == :opening ->
+      startup_in_progress?(state) ->
         {:noreply, record_open_failure(state, reason)}
 
       turn_starting?(state) ->
@@ -620,8 +724,12 @@ defmodule AgentHarness.SessionServer do
   @impl true
   def terminate(reason, state) do
     cancel_timer(state.open_timer)
+    cancel_timer(state.startup_finalization_timer)
+    cancel_timer(state.startup_rollback_timer)
     cancel_timer(state.turn_start_timer)
     shutdown_task(state.open_task)
+    shutdown_task(state.startup_finalization_task)
+    shutdown_task(state.startup_rollback_task)
     shutdown_task(state.turn_start_task)
 
     state = maybe_persist_shutdown(reason, state)
@@ -642,41 +750,29 @@ defmodule AgentHarness.SessionServer do
     end
   end
 
-  defp finish_provider_open(
+  defp finish_provider_open_result(state, result) do
+    case accept_provider_open(state, result) do
+      {:ok, state} -> {:noreply, state}
+      {:error, reason, state} -> stop_failed_startup(state, reason)
+    end
+  end
+
+  defp accept_provider_open(
          %State{open_failure: reason} = state,
          {:ok, provider_handle, _info, _replacement}
        )
        when not is_nil(reason) do
-    safe_close_provider(state.provider, provider_handle)
+    safe_close_provider(
+      state.provider,
+      provider_handle,
+      startup_cleanup_timeout(state)
+    )
+
     {:error, {:provider_open_failed, {:transport_down, reason}}, state}
   end
 
-  defp finish_provider_open(state, {:ok, provider_handle, info, replacement})
+  defp accept_provider_open(state, {:ok, provider_handle, info, replacement})
        when is_map(info) do
-    case replace_stored_session(state.store, state.session.id, replacement) do
-      :ok ->
-        initialize_provider_state(state, provider_handle, info)
-
-      {:error, reason} ->
-        safe_close_provider(state.provider, provider_handle)
-        {:error, reason, clear_provider(state)}
-    end
-  end
-
-  defp finish_provider_open(%State{open_failure: failure} = state, {:error, _reason})
-       when not is_nil(failure) do
-    {:error, {:provider_open_failed, {:transport_down, failure}}, state}
-  end
-
-  defp finish_provider_open(state, {:error, reason}) do
-    {:error, normalize_provider_open_error(reason), state}
-  end
-
-  defp finish_provider_open(state, other) do
-    {:error, {:provider_open_failed, {:invalid_return, other}}, state}
-  end
-
-  defp initialize_provider_state(state, provider_handle, info) do
     provider_session_id =
       Map.get(
         state.open_session_attrs,
@@ -684,44 +780,296 @@ defmodule AgentHarness.SessionServer do
         Map.get(info, :provider_session_id)
       )
 
+    replacement_marker = :atomics.new(1, [])
+
     state = %{
       state
-      | status: :idle,
+      | status: :finalizing,
         provider_handle: provider_handle,
         provider_monitor: monitor_provider(state.provider, provider_handle, info),
         provider_session_id: provider_session_id,
-        open_session_attrs: %{}
+        open_session_attrs: %{},
+        startup_replacement: replacement,
+        startup_replacement_marker: replacement_marker
     }
 
     try do
-      state = persist_session(state)
+      task =
+        OwnedTask.async_nolink(AgentHarness.RunnerSupervisor, fn ->
+          finalize_startup_store(state, replacement, replacement_marker)
+        end)
 
-      state =
-        emit(state, nil, :session_ready, %{
-          provider_session_id: state.provider_session_id
-        })
+      timer =
+        Process.send_after(
+          self(),
+          {:startup_finalization_timeout, task.ref},
+          state.config.startup_finalization_timeout
+        )
 
-      started_at =
-        Telemetry.start([:session], %{
-          session_id: state.session.id,
-          provider: state.session.provider
-        })
+      notify_starter(state, {:phase, :finalizing})
 
-      {:ok, %{state | session_started_monotonic: started_at}}
-    rescue
-      error ->
-        safe_close_provider(state.provider, provider_handle)
-        state = clear_provider(state)
-
-        {:error,
-         {:session_initialization_failed,
-          {:exception, error.__struct__, Exception.message(error)}}, state}
+      {:ok,
+       %{
+         state
+         | startup_finalization_task: task,
+           startup_finalization_timer: timer
+       }}
     catch
-      kind, reason ->
-        safe_close_provider(state.provider, provider_handle)
-        state = clear_provider(state)
-        {:error, {:session_initialization_failed, {kind, reason}}, state}
+      :exit, reason ->
+        {:error, {:session_start_finalization_task_failed, reason}, state}
     end
+  end
+
+  defp accept_provider_open(%State{open_failure: failure} = state, {:error, _reason})
+       when not is_nil(failure) do
+    {:error, {:provider_open_failed, {:transport_down, failure}}, state}
+  end
+
+  defp accept_provider_open(state, {:error, reason}) do
+    {:error, normalize_provider_open_error(reason), state}
+  end
+
+  defp accept_provider_open(state, other) do
+    {:error, {:provider_open_failed, {:invalid_return, other}}, state}
+  end
+
+  defp finalize_startup_store(%State{store: false} = state, _replacement, _marker) do
+    {:ok, startup_ready_event(state)}
+  end
+
+  defp finalize_startup_store(%State{store: {module, owner}} = state, replacement, marker) do
+    with :ok <- delete_replaced_startup(state, module, owner, replacement, marker),
+         :ok <-
+           startup_store_write(state, :save_session, fn ->
+             module.save_session(owner, state.session.id, session_snapshot(state))
+           end),
+         event = startup_ready_event(state),
+         :ok <-
+           startup_store_write(state, :append_event, fn ->
+             module.append_event(owner, event)
+           end),
+         :ok <-
+           startup_store_write(state, :save_session, fn ->
+             idle_state = %{state | status: :idle}
+             module.save_session(owner, state.session.id, session_snapshot(idle_state))
+           end) do
+      {:ok, event}
+    end
+  end
+
+  defp delete_replaced_startup(_state, _module, _owner, :none, _marker), do: :ok
+
+  defp delete_replaced_startup(state, module, owner, :replace, marker) do
+    case startup_store_write(state, :delete_session, fn ->
+           module.delete_session(owner, state.session.id)
+         end) do
+      :ok ->
+        :atomics.put(marker, 1, 1)
+        :ok
+
+      error ->
+        error
+    end
+  end
+
+  defp startup_store_write(state, operation, write) do
+    case telemetry_store_write(state, operation, write) do
+      :ok -> :ok
+      {:error, reason} -> {:error, operation, reason}
+    end
+  end
+
+  defp startup_ready_event(state) do
+    build_event(
+      state,
+      nil,
+      :session_ready,
+      %{provider_session_id: state.provider_session_id},
+      nil
+    )
+  end
+
+  defp finish_startup_finalization(
+         %State{open_failure: failure} = state,
+         {:ok, %Event{}}
+       )
+       when not is_nil(failure) do
+    fail_startup(state, {:provider_open_failed, {:transport_down, failure}})
+  end
+
+  defp finish_startup_finalization(state, {:ok, %Event{} = event}) do
+    state =
+      state
+      |> Map.put(:status, :idle)
+      |> publish_event(event)
+      |> start_session_telemetry()
+      |> clear_startup_tracking()
+
+    pending_attrs = state.open_session_attrs
+    state = %{state | open_session_attrs: %{}}
+
+    if map_size(pending_attrs) > 0 do
+      send(self(), {:apply_startup_session_attrs, state.sink.ref, pending_attrs})
+    end
+
+    notify_starter(state, {:ok, self()})
+    {:noreply, state}
+  end
+
+  defp finish_startup_finalization(state, {:error, operation, reason}) do
+    public_reason = {:session_initialization_failed, {operation, reason}}
+    fail_startup(state, public_reason, {operation, reason})
+  end
+
+  defp finish_startup_finalization(state, other) do
+    fail_startup(
+      state,
+      {:session_initialization_failed, {:invalid_finalization_return, other}}
+    )
+  end
+
+  defp fail_startup(state, public_reason, store_failure \\ nil) do
+    state = %{
+      state
+      | status: :rolling_back,
+        startup_failure: %{reason: public_reason, store_failure: store_failure}
+    }
+
+    if startup_rollback_required?(state) do
+      start_startup_rollback(state)
+    else
+      finish_startup_failure(state)
+    end
+  end
+
+  defp startup_rollback_required?(%State{store: false}), do: false
+  defp startup_rollback_required?(%State{startup_replacement: :none}), do: true
+
+  defp startup_rollback_required?(%State{startup_replacement: :replace} = state) do
+    :atomics.get(state.startup_replacement_marker, 1) == 1
+  end
+
+  defp startup_rollback_required?(_state), do: false
+
+  defp start_startup_rollback(%State{store: {module, owner}} = state) do
+    try do
+      task =
+        OwnedTask.async_nolink(AgentHarness.RunnerSupervisor, fn ->
+          telemetry_store_write(state, :delete_session, fn ->
+            module.delete_session(owner, state.session.id)
+          end)
+        end)
+
+      timer =
+        Process.send_after(
+          self(),
+          {:startup_rollback_timeout, task.ref},
+          state.config.startup_finalization_timeout
+        )
+
+      {:noreply,
+       %{
+         state
+         | startup_rollback_task: task,
+           startup_rollback_timer: timer
+       }}
+    catch
+      :exit, reason -> finish_startup_rollback(state, {:error, {:task_failed, reason}})
+    end
+  end
+
+  defp finish_startup_rollback(state, result) do
+    if result != :ok do
+      Logger.warning(
+        "AgentHarness startup rollback failed " <>
+          "session_id=#{state.session.id} provider=#{state.session.provider} " <>
+          "reason=#{inspect(result)}"
+      )
+    end
+
+    finish_startup_failure(state)
+  end
+
+  defp finish_startup_failure(%State{startup_failure: failure} = state) do
+    if degradable_startup_failure?(state, failure) do
+      complete_degraded_startup(state, failure.store_failure)
+    else
+      stop_failed_startup(state, failure.reason)
+    end
+  end
+
+  defp degradable_startup_failure?(
+         %State{config: %{store_failure: :degrade}, open_failure: nil},
+         %{store_failure: {operation, _reason}}
+       ) do
+    operation in [:save_session, :append_event]
+  end
+
+  defp degradable_startup_failure?(_state, _failure), do: false
+
+  defp complete_degraded_startup(state, {operation, reason}) do
+    pending_attrs = state.open_session_attrs
+    state = update_provider_session_id(state, pending_attrs)
+    state = handle_store_failure(state, operation, reason)
+    state = %{state | status: :idle, open_session_attrs: %{}}
+
+    state =
+      state
+      |> publish_event(startup_ready_event(state))
+      |> start_session_telemetry()
+      |> clear_startup_tracking()
+
+    state =
+      if map_size(pending_attrs) > 0 do
+        emit(state, nil, :session_updated, pending_attrs)
+      else
+        state
+      end
+
+    notify_starter(state, {:ok, self()})
+    {:noreply, state}
+  end
+
+  defp stop_failed_startup(state, reason) do
+    state = close_failed_startup_provider(state)
+    notify_starter(state, {:error, reason})
+    {:stop, :normal, state |> clear_startup_tracking() |> clear_starter()}
+  end
+
+  defp close_failed_startup_provider(%State{provider_handle: nil} = state), do: state
+
+  defp close_failed_startup_provider(state) do
+    safe_close_provider(
+      state.provider,
+      state.provider_handle,
+      startup_cleanup_timeout(state)
+    )
+
+    clear_provider(state)
+  end
+
+  defp startup_cleanup_timeout(state) do
+    configured = Application.get_env(:agent_harness, :provider_close_timeout, 5_000)
+    min(configured, state.config.startup_finalization_timeout)
+  end
+
+  defp start_session_telemetry(state) do
+    started_at =
+      Telemetry.start([:session], %{
+        session_id: state.session.id,
+        provider: state.session.provider
+      })
+
+    %{state | session_started_monotonic: started_at}
+  end
+
+  defp clear_startup_tracking(state) do
+    %{
+      state
+      | startup_replacement: nil,
+        startup_replacement_marker: nil,
+        startup_failure: nil
+    }
   end
 
   defp open_provider(provider, config, sink) do
@@ -755,6 +1103,11 @@ defmodule AgentHarness.SessionServer do
       {:ok, %{status: :closed}} when reuse in [:closed, :replace] ->
         {:ok, :replace}
 
+      # A previous owner died after staging startup but before readiness. It is
+      # not a reusable logical session and must not burn the caller's ID.
+      {:ok, %{status: :finalizing}} ->
+        {:ok, :replace}
+
       {:ok, _snapshot} when reuse == :replace ->
         {:ok, :replace}
 
@@ -775,28 +1128,16 @@ defmodule AgentHarness.SessionServer do
       {:error, {:store_read_failed, {kind, reason}}}
   end
 
-  defp replace_stored_session(_store, _session_id, :none), do: :ok
-
-  defp replace_stored_session({module, owner}, session_id, :replace) do
-    case module.delete_session(owner, session_id) do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:store_delete_failed, reason}}
-      other -> {:error, {:invalid_store_response, other}}
-    end
-  rescue
-    error ->
-      {:error, {:store_delete_failed, {:exception, error.__struct__, Exception.message(error)}}}
-  catch
-    kind, reason -> {:error, {:store_delete_failed, {kind, reason}}}
+  defp safe_close_provider(provider, provider_handle) do
+    timeout = Application.get_env(:agent_harness, :provider_close_timeout, 5_000)
+    safe_close_provider(provider, provider_handle, timeout)
   end
 
-  defp safe_close_provider(provider, provider_handle) do
+  defp safe_close_provider(provider, provider_handle, timeout) do
     task =
       Task.Supervisor.async(AgentHarness.RunnerSupervisor, fn ->
         provider.close_session(provider_handle)
       end)
-
-    timeout = Application.get_env(:agent_harness, :provider_close_timeout, 5_000)
 
     case Task.yield(task, timeout) do
       {:ok, _result} ->
@@ -1661,6 +2002,24 @@ defmodule AgentHarness.SessionServer do
     end
   end
 
+  defp startup_in_progress?(%State{status: status}) do
+    status in [:opening, :finalizing, :rolling_back]
+  end
+
+  defp apply_session_update(state, attrs) do
+    state
+    |> update_provider_session_id(attrs)
+    |> persist_session()
+    |> emit(nil, :session_updated, attrs)
+  end
+
+  defp update_provider_session_id(state, attrs) do
+    case Map.fetch(attrs, :provider_session_id) do
+      {:ok, provider_session_id} -> %{state | provider_session_id: provider_session_id}
+      :error -> state
+    end
+  end
+
   defp transport_down(%State{status: :unavailable} = state, _reason), do: state
 
   defp transport_down(state, reason) do
@@ -1827,7 +2186,8 @@ defmodule AgentHarness.SessionServer do
   defp shutdown_task(%Task{} = task), do: Task.shutdown(task, :brutal_kill)
 
   defp maybe_persist_shutdown(reason, %State{status: status} = state)
-       when reason in [:normal, :shutdown] and status not in [:opening, :closed] do
+       when reason in [:normal, :shutdown] and
+              status not in [:opening, :finalizing, :rolling_back, :closed] do
     close_state(state)
   rescue
     _error -> state

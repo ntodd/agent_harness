@@ -22,6 +22,7 @@ defmodule AgentHarness.SessionConfig do
     event_buffer_size: 1_000,
     completed_turn_cache_size: 1_000,
     startup_timeout: 30_000,
+    startup_finalization_timeout: 5_000,
     turn_start_timeout: 30_000,
     store_failure: :degrade,
     store: {AgentHarness.Store.Memory, AgentHarness.Store.Memory}
@@ -43,6 +44,7 @@ defmodule AgentHarness.SessionConfig do
           event_buffer_size: pos_integer(),
           completed_turn_cache_size: non_neg_integer() | :infinity,
           startup_timeout: pos_integer(),
+          startup_finalization_timeout: pos_integer(),
           turn_start_timeout: pos_integer(),
           store_failure: :degrade | :stop,
           store: false | {module(), term()}
@@ -56,6 +58,9 @@ defmodule AgentHarness.SessionConfig do
       Keyword.get(opts, :completed_turn_cache_size, event_buffer_size)
 
     startup_timeout = Keyword.get(opts, :startup_timeout, 30_000)
+
+    startup_finalization_timeout = Keyword.get(opts, :startup_finalization_timeout, 5_000)
+
     turn_start_timeout = Keyword.get(opts, :turn_start_timeout, 30_000)
     store_failure = Keyword.get(opts, :store_failure, :degrade)
 
@@ -66,6 +71,7 @@ defmodule AgentHarness.SessionConfig do
     validate_completed_turn_cache_size!(completed_turn_cache_size)
 
     validate_timeout!(startup_timeout, :startup_timeout)
+    validate_timeout!(startup_finalization_timeout, :startup_finalization_timeout)
     validate_timeout!(turn_start_timeout, :turn_start_timeout)
     validate_store_failure!(store_failure)
 
@@ -85,6 +91,7 @@ defmodule AgentHarness.SessionConfig do
       event_buffer_size: event_buffer_size,
       completed_turn_cache_size: completed_turn_cache_size,
       startup_timeout: startup_timeout,
+      startup_finalization_timeout: startup_finalization_timeout,
       turn_start_timeout: turn_start_timeout,
       store_failure: store_failure,
       store:

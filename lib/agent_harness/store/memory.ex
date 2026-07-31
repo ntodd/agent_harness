@@ -22,6 +22,7 @@ defmodule AgentHarness.Store.Memory do
   @behaviour AgentHarness.Store
 
   alias AgentHarness.{Event, Request, Turn}
+  alias AgentHarness.Internal.OwnedTask
 
   defmodule State do
     @moduledoc false
@@ -79,9 +80,12 @@ defmodule AgentHarness.Store.Memory do
 
   @impl AgentHarness.Store
   def delete_session(owner, session_id) when is_binary(session_id) do
+    task_owner = OwnedTask.owner()
+
     case live_session(session_id) do
       nil -> call(owner, {:delete_session, session_id})
       pid when pid == self() -> call(owner, {:delete_session, session_id})
+      pid when pid == task_owner -> call(owner, {:delete_session, session_id})
       _pid -> {:error, :session_active}
     end
   end

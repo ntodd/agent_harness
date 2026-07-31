@@ -346,7 +346,7 @@ defmodule AgentHarness do
     ]
 
     case DynamicSupervisor.start_child(@session_supervisor, {SessionServer, child_opts}) do
-      {:ok, pid} -> await_session_start(pid, start_ref, session, config.startup_timeout)
+      {:ok, pid} -> await_session_start(pid, start_ref, session, config)
       {:error, {:already_started, _pid}} -> {:error, :session_already_exists}
       {:error, reason} -> {:error, reason}
     end
@@ -438,9 +438,41 @@ defmodule AgentHarness do
     end
   end
 
-  defp await_session_start(pid, start_ref, session, timeout) do
+  defp await_session_start(pid, start_ref, session, config) do
     monitor = Process.monitor(pid)
 
+    receive do
+      {SessionServer, ^start_ref, {:phase, :finalizing}} ->
+        await_session_finalization(pid, start_ref, session, monitor, config)
+
+      {SessionServer, ^start_ref, {:ok, ^pid}} ->
+        send(pid, {SessionServer, start_ref, :starter_ack})
+        Process.demonitor(monitor, [:flush])
+        {:ok, session}
+
+      {SessionServer, ^start_ref, {:error, reason}} ->
+        await_start_failure_down(monitor, pid, session.id)
+        {:error, reason}
+
+      {:DOWN, ^monitor, :process, ^pid, reason} ->
+        result =
+          receive do
+            {SessionServer, ^start_ref, {:error, startup_reason}} -> {:error, startup_reason}
+          after
+            0 -> {:error, normalize_start_exit(reason)}
+          end
+
+        await_registry_release(session.id)
+        result
+    after
+      config.startup_timeout + 100 ->
+        if Process.alive?(pid), do: Process.exit(pid, :kill)
+        await_timed_out_session_down(monitor, pid, session.id)
+        {:error, :session_start_timeout}
+    end
+  end
+
+  defp await_session_finalization(pid, start_ref, session, monitor, config) do
     receive do
       {SessionServer, ^start_ref, {:ok, ^pid}} ->
         send(pid, {SessionServer, start_ref, :starter_ack})
@@ -462,10 +494,10 @@ defmodule AgentHarness do
         await_registry_release(session.id)
         result
     after
-      timeout + 100 ->
+      config.startup_finalization_timeout * 3 + 100 ->
         if Process.alive?(pid), do: Process.exit(pid, :kill)
         await_timed_out_session_down(monitor, pid, session.id)
-        {:error, :session_start_timeout}
+        {:error, :session_start_finalization_timeout}
     end
   end
 

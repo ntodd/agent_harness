@@ -32,6 +32,7 @@ defmodule AgentHarness.SessionServer do
       :config,
       :provider,
       :provider_handle,
+      :provider_monitor,
       :provider_session_id,
       :sink,
       :current_turn,
@@ -78,6 +79,7 @@ defmodule AgentHarness.SessionServer do
           config: config,
           provider: provider,
           provider_handle: provider_handle,
+          provider_monitor: monitor_provider(provider_handle),
           provider_session_id: Map.get(info, :provider_session_id),
           sink: sink,
           event_buffer: EventBuffer.new(config.event_buffer_size),
@@ -218,7 +220,7 @@ defmodule AgentHarness.SessionServer do
     {:reply, {:error, :turn_not_active}, state}
   end
 
-  def handle_call({:stop, false}, _from, %State{status: :idle} = state) do
+  def handle_call({:stop, false}, _from, %State{current_turn: nil} = state) do
     {:stop, :normal, :ok, close_state(state)}
   end
 
@@ -318,21 +320,19 @@ defmodule AgentHarness.SessionServer do
         {:agent_harness_provider, sink_ref, {:transport_down, reason}},
         %State{sink: %Sink{ref: sink_ref}} = state
       ) do
-    state = emit(state, current_turn_id(state), :transport_error, %{reason: reason})
-
-    state =
-      case state.current_turn do
-        nil -> %{state | status: :unavailable}
-        turn -> complete_turn(state, turn.id, :failed, %{reason: reason}, nil)
-      end
-
-    state = %{state | status: :unavailable}
-    :ok = persist_session(state)
-    {:noreply, state}
+    {:noreply, transport_down(state, reason)}
   end
 
   def handle_info({:agent_harness_provider, _stale_ref, _message}, state) do
     {:noreply, state}
+  end
+
+  def handle_info(
+        {:DOWN, monitor, :process, _pid, reason},
+        %State{provider_monitor: monitor} = state
+      ) do
+    state = %{state | provider_monitor: nil}
+    {:noreply, transport_down(state, reason)}
   end
 
   def handle_info({:DOWN, monitor, :process, _pid, _reason}, state) do
@@ -547,6 +547,33 @@ defmodule AgentHarness.SessionServer do
 
   defp current_turn_id(%State{current_turn: %Turn{id: turn_id}}), do: turn_id
   defp current_turn_id(_state), do: nil
+
+  defp monitor_provider(provider_handle) when is_pid(provider_handle) do
+    Process.monitor(provider_handle)
+  end
+
+  defp monitor_provider(_provider_handle), do: nil
+
+  defp transport_down(%State{status: :unavailable} = state, _reason), do: state
+
+  defp transport_down(state, reason) do
+    state = emit(state, current_turn_id(state), :transport_error, %{reason: reason})
+
+    state =
+      case state.current_turn do
+        nil ->
+          state
+
+        turn ->
+          state
+          |> expire_pending_requests(turn.id)
+          |> complete_turn(turn.id, :failed, %{reason: reason}, nil)
+      end
+
+    state = %{state | status: :unavailable}
+    :ok = persist_session(state)
+    state
+  end
 
   defp close_state(state) do
     state = %{state | status: :closed}

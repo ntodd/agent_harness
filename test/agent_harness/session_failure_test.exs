@@ -136,4 +136,47 @@ defmodule AgentHarness.SessionFailureTest do
     refute_receive {:agent_harness, ^ref, %Event{type: :message_delta}}, 20
     assert :ok = AgentHarness.stop_session(session, force: true)
   end
+
+  test "provider process loss fails the active turn and leaves a stoppable session" do
+    test_pid = self()
+
+    provider_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    expect(ProviderMock, :open_session, fn _config, sink ->
+      send(test_pid, {:sink, sink})
+      {:ok, provider_pid, %{}}
+    end)
+
+    expect(ProviderMock, :start_turn, fn ^provider_pid, _turn, "Crash", [] ->
+      {:ok, "provider-turn-1"}
+    end)
+
+    expect(ProviderMock, :close_session, fn ^provider_pid -> :ok end)
+
+    {:ok, session} = AgentHarness.start_session(:test, provider_module: ProviderMock)
+    assert_receive {:sink, _sink}
+    {:ok, subscription} = AgentHarness.subscribe(session, from: :latest)
+    {:ok, turn} = AgentHarness.start_turn(session, "Crash")
+
+    assert_receive {:agent_harness, ref, %Event{type: :turn_started}}
+    assert ref == subscription.ref
+
+    Process.exit(provider_pid, :kill)
+
+    assert_receive {:agent_harness, ^ref,
+                    %Event{type: :transport_error, data: %{reason: :killed}}}
+
+    assert_receive {:agent_harness, ^ref,
+                    %Event{type: :turn_failed, turn_id: turn_id, data: %{result: result}}}
+
+    assert turn_id == turn.id
+    assert result == %{reason: :killed}
+    assert %{status: :unavailable, current_turn: nil} = AgentHarness.status(session)
+    assert :ok = AgentHarness.stop_session(session)
+  end
 end

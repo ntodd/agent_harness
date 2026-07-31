@@ -124,4 +124,23 @@ defmodule AgentHarness.ValueObjectsTest do
              provider_options: %{experimental_api: true}
            } = config
   end
+
+  test "completed turn cache defaults to the event buffer and accepts bounded overrides" do
+    session = %SessionRef{id: "session-1", provider: :codex}
+
+    assert %SessionConfig{completed_turn_cache_size: 7} =
+             SessionConfig.new(session, event_buffer_size: 7)
+
+    assert %SessionConfig{completed_turn_cache_size: 0} =
+             SessionConfig.new(session, completed_turn_cache_size: 0)
+
+    assert %SessionConfig{completed_turn_cache_size: :infinity} =
+             SessionConfig.new(session, completed_turn_cache_size: :infinity)
+
+    assert_raise ArgumentError,
+                 "completed_turn_cache_size must be a non-negative integer or :infinity",
+                 fn ->
+                   SessionConfig.new(session, completed_turn_cache_size: -1)
+                 end
+  end
 end

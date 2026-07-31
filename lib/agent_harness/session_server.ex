@@ -17,6 +17,12 @@ defmodule AgentHarness.SessionServer do
 
   alias AgentHarness.Provider.Sink
 
+  defmodule CompletedTurnCache do
+    @moduledoc false
+
+    defstruct events: %{}, order: :queue.new(), count: 0, pruned?: false
+  end
+
   defmodule State do
     @moduledoc false
 
@@ -55,7 +61,7 @@ defmodule AgentHarness.SessionServer do
       status: :opening,
       durability: :durable,
       turns: %{},
-      terminal_events: %{},
+      completed_turn_cache: %CompletedTurnCache{},
       requests: %{},
       subscriptions: %{},
       monitors: %{},
@@ -165,26 +171,34 @@ defmodule AgentHarness.SessionServer do
   end
 
   def handle_call(
-        {:start_turn, %Turn{} = turn, input, provider_opts},
+        {:start_turn, %Turn{} = turn, input, provider_opts, explicit_id?},
         _from,
         %State{status: :idle} = state
       ) do
-    if Map.has_key?(state.turns, turn.id) do
-      {:reply, {:error, {:turn_id_already_used, turn.id}}, state}
-    else
-      start_provider_turn(state, turn, input, provider_opts)
+    case turn_id_availability(state, turn.id, explicit_id?) do
+      :available ->
+        start_provider_turn(state, turn, input, provider_opts)
+
+      :used ->
+        {:reply, {:error, {:turn_id_already_used, turn.id}}, state}
+
+      :history_unavailable ->
+        {:reply, {:error, {:turn_id_history_unavailable, turn.id}}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
   def handle_call(
-        {:start_turn, %Turn{}, _input, _opts},
+        {:start_turn, %Turn{}, _input, _opts, _explicit_id?},
         _from,
         %State{status: :unavailable} = state
       ) do
     {:reply, {:error, :session_unavailable}, state}
   end
 
-  def handle_call({:start_turn, %Turn{}, _input, _opts}, _from, state) do
+  def handle_call({:start_turn, %Turn{}, _input, _opts, _explicit_id?}, _from, state) do
     {:reply, {:error, {:turn_in_progress, state.current_turn}}, state}
   end
 
@@ -193,40 +207,41 @@ defmodule AgentHarness.SessionServer do
       not valid_replay_cursor?(from) ->
         {:reply, {:error, {:invalid_replay_cursor, from}}, state}
 
-      is_binary(turn_id) and not Map.has_key?(state.turns, turn_id) ->
-        {:reply, {:error, :turn_not_found}, state}
+      is_binary(turn_id) ->
+        subscribe_to_turn(state, pid, turn_id, from, false)
 
       true ->
-        subscribe(state, pid, turn_id, from)
+        subscribe(state, pid, turn_id, from, false)
     end
   end
 
   def handle_call({:subscribe_stream, pid, turn_id, from}, _from, state) when is_pid(pid) do
-    cond do
-      not valid_replay_cursor?(from) ->
-        {:reply, {:error, {:invalid_replay_cursor, from}}, state}
-
-      not Map.has_key?(state.turns, turn_id) ->
-        {:reply, {:error, :turn_not_found}, state}
-
-      from == :latest and Map.has_key?(state.terminal_events, turn_id) ->
-        {:reply, {:error, :replay_unavailable}, state}
-
-      true ->
-        subscribe(state, pid, turn_id, from)
+    if valid_replay_cursor?(from) do
+      subscribe_to_turn(state, pid, turn_id, from, true)
+    else
+      {:reply, {:error, {:invalid_replay_cursor, from}}, state}
     end
   end
 
   def handle_call({:await, pid, turn_id}, _from, state) when is_pid(pid) do
-    case Map.fetch(state.terminal_events, turn_id) do
-      {:ok, terminal_event} ->
+    case lookup_turn_history(state, turn_id) do
+      {:terminal, terminal_event} ->
         {:reply, {:terminal, terminal_event}, state}
 
-      :error when is_map_key(state.turns, turn_id) ->
-        subscribe(state, pid, turn_id, :start)
+      {:active, _turn} ->
+        subscribe(state, pid, turn_id, :start, false)
 
-      :error ->
+      :not_found ->
         {:reply, {:error, :turn_not_found}, state}
+
+      :history_unavailable ->
+        {:reply, {:error, :replay_unavailable}, state}
+
+      :terminal_unavailable ->
+        {:reply, {:error, :replay_unavailable}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -239,20 +254,26 @@ defmodule AgentHarness.SessionServer do
   end
 
   def handle_call({:respond, request_id, response}, _from, state) do
-    case Map.get(state.requests, request_id) do
-      nil ->
+    case lookup_request(state, request_id) do
+      :not_found ->
         {:reply, {:error, :request_not_found}, state}
 
-      %Request{status: :resolved} ->
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+
+      {_source, %Request{status: :resolved}} ->
         {:reply, {:error, :already_resolved}, state}
 
-      %Request{status: :expired} ->
+      {_source, %Request{status: :expired}} ->
         {:reply, {:error, :request_expired}, state}
 
-      %Request{status: :pending} when state.status == :cancelling ->
+      {:cold, %Request{status: :pending}} ->
+        {:reply, {:error, :request_not_active}, state}
+
+      {:hot, %Request{status: :pending}} when state.status == :cancelling ->
         {:reply, {:error, :turn_cancelling}, state}
 
-      %Request{status: :pending} = request ->
+      {:hot, %Request{status: :pending} = request} ->
         respond_to_request(state, request, response)
     end
   end
@@ -787,10 +808,32 @@ defmodule AgentHarness.SessionServer do
     %{state | provider_handle: nil, provider_monitor: nil}
   end
 
-  defp subscribe(state, pid, turn_id, from) do
+  defp subscribe_to_turn(state, pid, turn_id, from, stream?) do
+    case lookup_turn_history(state, turn_id) do
+      {:terminal, _event} when stream? and from == :latest ->
+        {:reply, {:error, :replay_unavailable}, state}
+
+      {:terminal, _event} ->
+        subscribe(state, pid, turn_id, from, true)
+
+      {:active, _turn} ->
+        subscribe(state, pid, turn_id, from, false)
+
+      :not_found ->
+        {:reply, {:error, :turn_not_found}, state}
+
+      unavailable when unavailable in [:history_unavailable, :terminal_unavailable] ->
+        {:reply, {:error, :replay_unavailable}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp subscribe(state, pid, turn_id, from, completed?) do
     events = replay_events(state, turn_id, from)
 
-    if replay_unavailable?(state, turn_id, from, events) do
+    if replay_unavailable?(turn_id, from, events, completed?) do
       {:reply, {:error, :replay_unavailable}, state}
     else
       install_subscription(state, pid, turn_id, events)
@@ -820,12 +863,164 @@ defmodule AgentHarness.SessionServer do
     {:reply, {:ok, subscription}, state}
   end
 
-  defp replay_unavailable?(_state, nil, _from, _events), do: false
-  defp replay_unavailable?(_state, _turn_id, :latest, _events), do: false
+  defp replay_unavailable?(nil, _from, _events, _completed?), do: false
+  defp replay_unavailable?(_turn_id, :latest, _events, _completed?), do: false
 
-  defp replay_unavailable?(state, turn_id, _from, events) do
-    Map.has_key?(state.terminal_events, turn_id) and
-      not Enum.any?(events, &terminal_event?/1)
+  defp replay_unavailable?(_turn_id, _from, events, completed?) do
+    completed? and not Enum.any?(events, &terminal_event?/1)
+  end
+
+  defp lookup_turn_history(state, turn_id) do
+    case local_terminal_event(state, turn_id) do
+      %Event{} = event ->
+        {:terminal, event}
+
+      nil ->
+        case Map.fetch(state.turns, turn_id) do
+          {:ok, %Turn{} = turn} -> lookup_hot_turn_history(state, turn)
+          :error -> lookup_cold_turn_history(state, turn_id)
+        end
+    end
+  end
+
+  defp lookup_hot_turn_history(state, %Turn{} = turn) do
+    if terminal_turn?(turn) do
+      case stored_terminal_event(state, turn.id) do
+        {:ok, event} -> {:terminal, event}
+        _unavailable -> :terminal_unavailable
+      end
+    else
+      {:active, turn}
+    end
+  end
+
+  defp lookup_cold_turn_history(
+         %State{store: false, completed_turn_cache: %CompletedTurnCache{pruned?: true}},
+         _turn_id
+       ),
+       do: :history_unavailable
+
+  defp lookup_cold_turn_history(%State{store: false}, _turn_id), do: :not_found
+
+  defp lookup_cold_turn_history(%State{store: {module, owner}} = state, turn_id) do
+    case safe_store_fetch_turn(module, owner, state.session.id, turn_id) do
+      {:ok, %Turn{} = turn} ->
+        lookup_stored_turn_history(state, turn)
+
+      :not_found ->
+        :not_found
+
+      {:error, reason} ->
+        {:error, {:store_read_failed, reason}}
+    end
+  end
+
+  defp lookup_stored_turn_history(state, %Turn{} = turn) do
+    if terminal_turn?(turn) do
+      case stored_terminal_event(state, turn.id) do
+        {:ok, event} -> {:terminal, event}
+        _unavailable -> :terminal_unavailable
+      end
+    else
+      :terminal_unavailable
+    end
+  end
+
+  defp local_terminal_event(state, turn_id) do
+    Map.get(state.completed_turn_cache.events, turn_id) ||
+      Enum.find(EventBuffer.to_list(state.event_buffer), fn event ->
+        event.turn_id == turn_id and terminal_event?(event)
+      end)
+  end
+
+  defp stored_terminal_event(%State{store: false}, _turn_id), do: :unavailable
+
+  defp stored_terminal_event(%State{store: {module, owner}} = state, turn_id) do
+    options = replay_options(turn_id, [])
+
+    case safe_store_events(module, owner, state.session.id, options) do
+      {:ok, events} ->
+        case Enum.find(events, &terminal_event?/1) do
+          %Event{} = event -> {:ok, event}
+          nil -> :unavailable
+        end
+
+      {:error, _reason} ->
+        :unavailable
+    end
+  end
+
+  defp turn_id_availability(state, turn_id, explicit_id?) do
+    cond do
+      Map.has_key?(state.turns, turn_id) ->
+        :used
+
+      local_terminal_event(state, turn_id) ->
+        :used
+
+      state.store == false and explicit_id? and state.completed_turn_cache.pruned? ->
+        :history_unavailable
+
+      state.store == false ->
+        :available
+
+      true ->
+        stored_turn_id_availability(state, turn_id)
+    end
+  end
+
+  defp stored_turn_id_availability(%State{store: {module, owner}} = state, turn_id) do
+    case safe_store_fetch_turn(module, owner, state.session.id, turn_id) do
+      {:ok, %Turn{}} -> :used
+      :not_found -> :available
+      {:error, reason} -> {:error, {:store_read_failed, reason}}
+    end
+  end
+
+  defp lookup_request(state, request_id) do
+    case Map.fetch(state.requests, request_id) do
+      {:ok, %Request{} = request} ->
+        {:hot, request}
+
+      :error ->
+        lookup_cold_request(state, request_id)
+    end
+  end
+
+  defp lookup_cold_request(%State{store: false}, _request_id), do: :not_found
+
+  defp lookup_cold_request(%State{store: {module, owner}} = state, request_id) do
+    case safe_store_fetch_request(module, owner, state.session.id, request_id) do
+      {:ok, %Request{} = request} -> {:cold, request}
+      :not_found -> :not_found
+      {:error, reason} -> {:error, {:store_read_failed, reason}}
+    end
+  end
+
+  defp safe_store_fetch_turn(module, owner, session_id, turn_id) do
+    case module.fetch_turn(owner, session_id, turn_id) do
+      {:ok, %Turn{} = turn} -> {:ok, turn}
+      :not_found -> :not_found
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:invalid_return, other}}
+    end
+  rescue
+    error -> {:error, {:exception, error.__struct__, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  defp safe_store_fetch_request(module, owner, session_id, request_id) do
+    case module.fetch_request(owner, session_id, request_id) do
+      {:ok, %Request{} = request} -> {:ok, request}
+      :not_found -> :not_found
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:invalid_return, other}}
+    end
+  rescue
+    error -> {:error, {:exception, error.__struct__, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 
   defp start_provider_turn(state, turn, input, provider_opts) do
@@ -1290,14 +1485,69 @@ defmodule AgentHarness.SessionServer do
     }
 
     if terminal_event?(event) do
-      %{state | terminal_events: Map.put(state.terminal_events, event.turn_id, event)}
+      cache_completed_turn(state, event)
     else
       state
     end
   end
 
+  defp cache_completed_turn(state, %Event{} = event) do
+    cache = state.completed_turn_cache
+    already_cached? = Map.has_key?(cache.events, event.turn_id)
+    cache = %{cache | events: Map.put(cache.events, event.turn_id, event)}
+    state = %{state | completed_turn_cache: cache}
+
+    if already_cached? do
+      state
+    else
+      cache = %{
+        cache
+        | order: :queue.in(event.turn_id, cache.order),
+          count: cache.count + 1
+      }
+
+      prune_completed_turns(%{state | completed_turn_cache: cache})
+    end
+  end
+
+  defp prune_completed_turns(%State{config: %{completed_turn_cache_size: :infinity}} = state),
+    do: state
+
+  defp prune_completed_turns(state)
+       when state.completed_turn_cache.count <= state.config.completed_turn_cache_size,
+       do: state
+
+  defp prune_completed_turns(state) do
+    cache = state.completed_turn_cache
+    {{:value, turn_id}, order} = :queue.out(cache.order)
+
+    requests =
+      Map.reject(state.requests, fn {_request_id, request} -> request.turn_id == turn_id end)
+
+    cache = %{
+      cache
+      | events: Map.delete(cache.events, turn_id),
+        order: order,
+        count: cache.count - 1,
+        pruned?: true
+    }
+
+    state = %{
+      state
+      | turns: Map.delete(state.turns, turn_id),
+        requests: requests,
+        completed_turn_cache: cache
+    }
+
+    prune_completed_turns(state)
+  end
+
   defp terminal_event?(%Event{type: type}) do
     type in [:turn_completed, :turn_failed, :turn_cancelled, :turn_interrupted]
+  end
+
+  defp terminal_turn?(%Turn{status: status}) do
+    status in [:completed, :failed, :cancelled, :interrupted]
   end
 
   defp replay_events(_state, _turn_id, :latest), do: []

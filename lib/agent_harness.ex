@@ -238,6 +238,10 @@ defmodule AgentHarness do
 
   @doc """
   Lists stored session snapshots and whether each has a live SessionServer.
+
+  The Store defaults to the built-in Memory instance. Pass
+  `store: {module, owner}` to inspect a custom Store; a PID-free session handle
+  does not retain that ownership information after its process stops.
   """
   @spec list_stored_sessions(keyword()) :: {:ok, [map()]} | {:error, term()}
   def list_stored_sessions(opts \\ []) when is_list(opts) do
@@ -355,12 +359,15 @@ defmodule AgentHarness do
       turn_options = Keyword.take(opts, [:id, :metadata])
       turn = Turn.new(session_id, input, turn_options)
       provider_options = Keyword.drop(opts, [:id, :metadata])
-      start_turn_call(session_id, turn, input, provider_options)
+      explicit_id? = Keyword.has_key?(opts, :id)
+      start_turn_call(session_id, turn, input, provider_options, explicit_id?)
     end
   end
 
-  defp start_turn_call(session_id, turn, input, provider_options) do
-    case call(session_id, {:start_turn, turn, input, provider_options}) do
+  defp start_turn_call(session_id, turn, input, provider_options, explicit_id?) do
+    message = {:start_turn, turn, input, provider_options, explicit_id?}
+
+    case call(session_id, message) do
       {:error, :session_call_timeout} -> {:error, {:session_call_timeout, turn}}
       result -> result
     end

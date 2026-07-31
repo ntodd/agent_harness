@@ -23,7 +23,9 @@ defmodule AgentHarness.SessionServer do
       :provider,
       :provider_handle,
       :sink,
-      :event_buffer
+      :event_buffer,
+      :store,
+      :created_at
     ]
     defstruct [
       :session,
@@ -34,6 +36,8 @@ defmodule AgentHarness.SessionServer do
       :sink,
       :current_turn,
       :provider_turn_ref,
+      :created_at,
+      :store,
       status: :idle,
       turns: %{},
       requests: %{},
@@ -76,8 +80,12 @@ defmodule AgentHarness.SessionServer do
           provider_handle: provider_handle,
           provider_session_id: Map.get(info, :provider_session_id),
           sink: sink,
-          event_buffer: EventBuffer.new(config.event_buffer_size)
+          event_buffer: EventBuffer.new(config.event_buffer_size),
+          store: config.store,
+          created_at: DateTime.utc_now()
         }
+
+        :ok = persist_session(state)
 
         state =
           emit(state, nil, :session_ready, %{
@@ -137,6 +145,9 @@ defmodule AgentHarness.SessionServer do
             turns: Map.put(state.turns, turn.id, turn)
         }
 
+        :ok = persist_turn(state, turn)
+        :ok = persist_session(state)
+
         state =
           emit(state, turn.id, :turn_started, %{
             turn: turn,
@@ -171,8 +182,8 @@ defmodule AgentHarness.SessionServer do
         monitors: Map.put(state.monitors, monitor, subscription.ref)
     }
 
-    state.event_buffer
-    |> events_from(from)
+    state
+    |> replay_events(from)
     |> Enum.filter(&matches_turn?(&1, turn_id))
     |> Enum.each(&deliver(subscription.ref, pid, &1))
 
@@ -208,7 +219,7 @@ defmodule AgentHarness.SessionServer do
   end
 
   def handle_call({:stop, false}, _from, %State{status: :idle} = state) do
-    {:stop, :normal, :ok, state}
+    {:stop, :normal, :ok, close_state(state)}
   end
 
   def handle_call({:stop, false}, _from, state) do
@@ -216,7 +227,7 @@ defmodule AgentHarness.SessionServer do
   end
 
   def handle_call({:stop, true}, _from, %State{current_turn: nil} = state) do
-    {:stop, :normal, :ok, state}
+    {:stop, :normal, :ok, close_state(state)}
   end
 
   def handle_call({:stop, true}, _from, state) do
@@ -225,7 +236,7 @@ defmodule AgentHarness.SessionServer do
         state = emit(state, state.current_turn.id, :cancel_requested)
         state = expire_pending_requests(state, state.current_turn.id)
         state = complete_turn(state, state.current_turn.id, :cancelled, %{forced: true}, nil)
-        {:stop, :normal, :ok, state}
+        {:stop, :normal, :ok, close_state(state)}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -267,6 +278,10 @@ defmodule AgentHarness.SessionServer do
           requests: Map.put(state.requests, request.id, request)
       }
 
+      :ok = persist_turn(state, turn)
+      :ok = persist_request(state, request)
+      :ok = persist_session(state)
+
       {:noreply, emit(state, turn_id, :request_created, request, raw)}
     else
       {:noreply, state}
@@ -295,6 +310,7 @@ defmodule AgentHarness.SessionServer do
         :error -> state
       end
 
+    :ok = persist_session(state)
     {:noreply, emit(state, nil, :session_updated, attrs)}
   end
 
@@ -310,7 +326,9 @@ defmodule AgentHarness.SessionServer do
         turn -> complete_turn(state, turn.id, :failed, %{reason: reason}, nil)
       end
 
-    {:noreply, %{state | status: :unavailable}}
+    state = %{state | status: :unavailable}
+    :ok = persist_session(state)
+    {:noreply, state}
   end
 
   def handle_info({:agent_harness_provider, _stale_ref, _message}, state) do
@@ -367,6 +385,10 @@ defmodule AgentHarness.SessionServer do
             turns: Map.put(state.turns, turn.id, turn)
         }
 
+        :ok = persist_turn(state, turn)
+        :ok = persist_request(state, request)
+        :ok = persist_session(state)
+
         data = %{request: request, response: response}
         {:reply, :ok, emit(state, request.turn_id, :request_resolved, data)}
 
@@ -382,7 +404,17 @@ defmodule AgentHarness.SessionServer do
   defp cancel_current_turn(state) do
     case state.provider.cancel(state.provider_handle, state.provider_turn_ref) do
       :ok ->
-        state = %{state | status: :cancelling}
+        turn = %{state.current_turn | status: :cancelling}
+
+        state = %{
+          state
+          | status: :cancelling,
+            current_turn: turn,
+            turns: Map.put(state.turns, turn.id, turn)
+        }
+
+        :ok = persist_turn(state, turn)
+        :ok = persist_session(state)
         {:reply, :ok, emit(state, state.current_turn.id, :cancel_requested)}
 
       {:error, reason} ->
@@ -414,6 +446,8 @@ defmodule AgentHarness.SessionServer do
         turns: Map.put(state.turns, turn_id, turn)
     }
 
+    :ok = persist_turn(state, turn)
+    :ok = persist_session(state)
     emit(state, turn_id, event_type, %{status: status, result: result}, raw)
   end
 
@@ -424,6 +458,7 @@ defmodule AgentHarness.SessionServer do
     |> Enum.reduce(state, fn request, acc ->
       request = %{request | status: :expired}
       acc = %{acc | requests: Map.put(acc.requests, request.id, request)}
+      :ok = persist_request(acc, request)
       emit(acc, turn_id, :request_expired, request)
     end)
   end
@@ -442,6 +477,8 @@ defmodule AgentHarness.SessionServer do
         raw: raw
       )
 
+    :ok = persist_event(state, event)
+
     Enum.each(state.subscriptions, fn {subscription_ref, subscriber} ->
       if matches_turn?(event, subscriber.turn_id) do
         deliver(subscription_ref, subscriber.pid, event)
@@ -455,11 +492,31 @@ defmodule AgentHarness.SessionServer do
     }
   end
 
-  defp events_from(buffer, :start), do: EventBuffer.from(buffer, :start)
-  defp events_from(buffer, :latest), do: EventBuffer.from(buffer, :latest)
+  defp replay_events(_state, :latest), do: []
 
-  defp events_from(buffer, {:after, seq}) when is_integer(seq),
-    do: EventBuffer.from(buffer, seq + 1)
+  defp replay_events(%State{store: false, event_buffer: buffer}, :start) do
+    EventBuffer.from(buffer, :start)
+  end
+
+  defp replay_events(%State{store: false, event_buffer: buffer}, {:after, seq})
+       when is_integer(seq) do
+    EventBuffer.from(buffer, seq + 1)
+  end
+
+  defp replay_events(%State{store: {module, owner}} = state, :start) do
+    case module.events(owner, state.session.id) do
+      {:ok, events} -> events
+      {:error, _reason} -> EventBuffer.from(state.event_buffer, :start)
+    end
+  end
+
+  defp replay_events(%State{store: {module, owner}} = state, {:after, seq})
+       when is_integer(seq) do
+    case module.events(owner, state.session.id, after: seq) do
+      {:ok, events} -> events
+      {:error, _reason} -> EventBuffer.from(state.event_buffer, seq + 1)
+    end
+  end
 
   defp matches_turn?(_event, nil), do: true
   defp matches_turn?(%Event{turn_id: turn_id}, turn_id), do: true
@@ -490,4 +547,59 @@ defmodule AgentHarness.SessionServer do
 
   defp current_turn_id(%State{current_turn: %Turn{id: turn_id}}), do: turn_id
   defp current_turn_id(_state), do: nil
+
+  defp close_state(state) do
+    state = %{state | status: :closed}
+    :ok = persist_session(state)
+    emit(state, nil, :session_closed)
+  end
+
+  defp persist_session(%State{store: false}), do: :ok
+
+  defp persist_session(%State{store: {module, owner}} = state) do
+    module.save_session(owner, state.session.id, session_snapshot(state))
+  end
+
+  defp persist_turn(%State{store: false}, _turn), do: :ok
+
+  defp persist_turn(%State{store: {module, owner}}, turn) do
+    module.save_turn(owner, turn)
+  end
+
+  defp persist_request(%State{store: false}, _request), do: :ok
+
+  defp persist_request(%State{store: {module, owner}}, request) do
+    module.save_request(owner, request)
+  end
+
+  defp persist_event(%State{store: false}, _event), do: :ok
+
+  defp persist_event(%State{store: {module, owner}}, event) do
+    module.append_event(owner, event)
+  end
+
+  defp session_snapshot(state) do
+    %{
+      id: state.session.id,
+      provider: state.session.provider,
+      status: state.status,
+      provider_session_id: state.provider_session_id,
+      current_turn_id: current_turn_id(state),
+      cwd: state.config.cwd,
+      model: state.config.model,
+      metadata: state.config.metadata,
+      config_fingerprint: config_fingerprint(state.config),
+      created_at: state.created_at,
+      updated_at: DateTime.utc_now()
+    }
+  end
+
+  defp config_fingerprint(config) do
+    config
+    |> Map.from_struct()
+    |> Map.delete(:store)
+    |> :erlang.term_to_binary()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
 end

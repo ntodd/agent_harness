@@ -253,6 +253,11 @@ defmodule AgentHarness do
   defp provider_module(:codex), do: AgentHarness.Providers.Codex
   defp provider_module(:claude), do: AgentHarness.Providers.Claude
 
-  defp provider_module(provider),
-    do: raise(ArgumentError, "unknown provider: #{inspect(provider)}")
+  defp provider_module(provider) do
+    if Code.ensure_loaded?(provider) and function_exported?(provider, :open_session, 2) do
+      provider
+    else
+      raise ArgumentError, "unknown provider: #{inspect(provider)}"
+    end
+  end
 end

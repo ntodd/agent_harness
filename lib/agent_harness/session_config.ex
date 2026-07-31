@@ -19,7 +19,8 @@ defmodule AgentHarness.SessionConfig do
     env: %{},
     provider_options: %{},
     metadata: %{},
-    event_buffer_size: 1_000
+    event_buffer_size: 1_000,
+    store: {AgentHarness.Store.Memory, AgentHarness.Store.Memory}
   ]
 
   @type t :: %__MODULE__{
@@ -35,7 +36,8 @@ defmodule AgentHarness.SessionConfig do
           env: map(),
           provider_options: map(),
           metadata: map(),
-          event_buffer_size: pos_integer()
+          event_buffer_size: pos_integer(),
+          store: false | {module(), term()}
         }
 
   @spec new(SessionRef.t(), keyword()) :: t()
@@ -59,7 +61,13 @@ defmodule AgentHarness.SessionConfig do
       env: Keyword.get(opts, :env, %{}),
       provider_options: Keyword.get(opts, :provider_options, %{}),
       metadata: Keyword.get(opts, :metadata, %{}),
-      event_buffer_size: event_buffer_size
+      event_buffer_size: event_buffer_size,
+      store:
+        Keyword.get(
+          opts,
+          :store,
+          {AgentHarness.Store.Memory, AgentHarness.Store.Memory}
+        )
     }
   end
 end

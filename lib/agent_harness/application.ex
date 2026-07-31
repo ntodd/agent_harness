@@ -8,12 +8,14 @@ defmodule AgentHarness.Application do
   @impl true
   def start(_type, _args) do
     children = [
+      {AgentHarness.Store.Memory, name: AgentHarness.Store.Memory},
       {Registry, keys: :unique, name: AgentHarness.SessionRegistry},
       {DynamicSupervisor, strategy: :one_for_one, name: AgentHarness.SessionSupervisor},
+      {DynamicSupervisor, strategy: :one_for_one, name: AgentHarness.ProviderSupervisor},
       {Task.Supervisor, name: AgentHarness.RunnerSupervisor}
     ]
 
-    opts = [strategy: :one_for_one, name: AgentHarness.Supervisor]
+    opts = [strategy: :rest_for_one, name: AgentHarness.Supervisor]
     Supervisor.start_link(children, opts)
   end
 end

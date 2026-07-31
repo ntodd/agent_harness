@@ -181,6 +181,58 @@ defmodule AgentHarness.SessionTest do
     assert :ok = AgentHarness.stop_session(session)
   end
 
+  test "serializes competing responses so the provider receives only one" do
+    test_pid = self()
+
+    expect(ProviderMock, :open_session, fn _config, sink ->
+      send(test_pid, {:sink, sink})
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :start_turn, fn :provider_handle, _turn, "Choose", [] ->
+      {:ok, "provider-turn-1"}
+    end)
+
+    expect(ProviderMock, :respond, fn :provider_handle, :question_ref, %Response{} ->
+      Process.sleep(10)
+      :ok
+    end)
+
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    {:ok, session} = AgentHarness.start_session(:test, provider_module: ProviderMock)
+    assert_receive {:sink, sink}
+    {:ok, subscription} = AgentHarness.subscribe(session, from: :latest)
+    {:ok, turn} = AgentHarness.start_turn(session, "Choose")
+
+    Provider.Sink.request(sink, turn.id, :question_ref,
+      kind: :question,
+      prompt: "A or B?"
+    )
+
+    assert_receive {:agent_harness, ref, %Event{type: :turn_started}}
+    assert ref == subscription.ref
+
+    assert_receive {:agent_harness, ^ref,
+                    %Event{type: :request_created, data: %Request{} = request}}
+
+    response = Response.answer("A")
+
+    results =
+      for _index <- 1..2 do
+        Task.async(fn -> AgentHarness.respond(request, response) end)
+      end
+      |> Task.await_many()
+
+    assert :ok in results
+    assert {:error, :already_resolved} in results
+
+    Provider.Sink.finish(sink, turn.id, :completed)
+    assert_receive {:agent_harness, ^ref, %Event{type: :request_resolved}}
+    assert_receive {:agent_harness, ^ref, %Event{type: :turn_completed}}
+    assert :ok = AgentHarness.stop_session(session)
+  end
+
   defp assert_receive_event(subscription, type, seq, turn_id \\ nil) do
     assert_receive {:agent_harness, subscription_ref,
                     %Event{type: ^type, seq: ^seq, turn_id: ^turn_id}}

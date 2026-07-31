@@ -10,6 +10,7 @@ defmodule AgentHarness.Turn do
           | :starting
           | :running
           | :awaiting_input
+          | :cancelling
           | :completed
           | :failed
           | :cancelled

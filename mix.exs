@@ -1,18 +1,24 @@
 defmodule AgentHarness.MixProject do
   use Mix.Project
 
+  @version "0.1.0"
+  @source_url "https://github.com/ntodd/agent_harness"
+
   def project do
     [
       app: :agent_harness,
       name: "AgentHarness",
-      version: "0.1.0",
+      version: @version,
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       docs: docs(),
+      package: package(),
       elixirc_paths: elixirc_paths(Mix.env()),
       aliases: aliases(),
-      description: "Supervised Elixir sessions for local coding-agent harnesses"
+      description: "Supervised Elixir sessions for local coding-agent harnesses",
+      source_url: @source_url,
+      homepage_url: @source_url
     ]
   end
 
@@ -56,8 +62,18 @@ defmodule AgentHarness.MixProject do
 
     [
       main: "readme",
-      extras: ["README.md", "CHANGELOG.md" | guides],
-      groups_for_extras: [Guides: guides]
+      extras: ["README.md", "CHANGELOG.md", "LICENSE" | guides],
+      groups_for_extras: [Guides: guides, Project: ["CHANGELOG.md", "LICENSE"]],
+      source_ref: "v#{@version}",
+      source_url: @source_url
+    ]
+  end
+
+  defp package do
+    [
+      files: ["lib", "docs", "mix.exs", "README.md", "CHANGELOG.md", "LICENSE"],
+      licenses: ["MIT"],
+      links: %{"GitHub" => @source_url}
     ]
   end
 

@@ -236,3 +236,7 @@ $ mise exec -- mix test --include live
 
 Live tests invoke your authenticated CLI and may consume subscription or API
 usage. Read [Testing](docs/testing.md) before enabling them.
+
+## License
+
+AgentHarness is available under the [MIT License](LICENSE).

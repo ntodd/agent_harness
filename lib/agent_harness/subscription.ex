@@ -3,13 +3,14 @@ defmodule AgentHarness.Subscription do
   Handle for a monitored event subscription.
   """
 
-  @enforce_keys [:ref, :session_id, :pid]
-  defstruct [:ref, :session_id, :turn_id, :pid]
+  @enforce_keys [:ref, :session_id, :pid, :server]
+  defstruct [:ref, :session_id, :turn_id, :pid, :server]
 
   @type t :: %__MODULE__{
           ref: reference(),
           session_id: String.t(),
           turn_id: String.t() | nil,
-          pid: pid()
+          pid: pid(),
+          server: pid()
         }
 end

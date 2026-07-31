@@ -8,6 +8,11 @@ defmodule AgentHarness.SessionFailureTest do
   setup :set_mox_global
   setup :verify_on_exit!
 
+  defmodule FailingStore do
+    def fetch_session(_owner, _session_id), do: :not_found
+    def save_session(_owner, _session_id, _snapshot), do: {:error, :disk_full}
+  end
+
   test "a provider-open failure leaves no registered session" do
     expect(ProviderMock, :open_session, fn _config, _sink -> {:error, :not_authenticated} end)
 
@@ -237,6 +242,111 @@ defmodule AgentHarness.SessionFailureTest do
     assert %{status: :unavailable, current_turn: nil} = AgentHarness.status(session)
     assert {:error, :session_unavailable} = AgentHarness.start_turn(session, "Retry")
     assert {:error, :session_unavailable} = AgentHarness.capabilities(session)
+    assert :ok = AgentHarness.stop_session(session)
+  end
+
+  test "initialization closes an opened provider when the Store write fails" do
+    provider_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    provider_monitor = Process.monitor(provider_pid)
+
+    expect(ProviderMock, :open_session, fn _config, _sink ->
+      {:ok, provider_pid, %{}}
+    end)
+
+    expect(ProviderMock, :close_session, fn ^provider_pid ->
+      send(provider_pid, :stop)
+      :ok
+    end)
+
+    assert {:error, {:session_initialization_failed, _reason}} =
+             AgentHarness.start_session(:test,
+               provider_module: ProviderMock,
+               store: {FailingStore, :owner}
+             )
+
+    assert_receive {:DOWN, ^provider_monitor, :process, ^provider_pid, :normal}
+  end
+
+  test "cancellation expires pending requests and late requests cannot revive the turn" do
+    test_pid = self()
+
+    expect(ProviderMock, :open_session, fn _config, sink ->
+      send(test_pid, {:sink, sink})
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :start_turn, fn :provider_handle, _turn, "Cancel", [] ->
+      {:ok, "provider-turn-1"}
+    end)
+
+    expect(ProviderMock, :cancel, fn :provider_handle, "provider-turn-1" -> :ok end)
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    {:ok, session} = AgentHarness.start_session(:test, provider_module: ProviderMock)
+    assert_receive {:sink, sink}
+    {:ok, subscription} = AgentHarness.subscribe(session, from: :latest)
+    {:ok, turn} = AgentHarness.start_turn(session, "Cancel")
+
+    Provider.Sink.request(sink, turn.id, :pending,
+      kind: :permission,
+      prompt: "Allow?"
+    )
+
+    assert_receive {:agent_harness, ref, %Event{type: :turn_started}}
+    assert ref == subscription.ref
+
+    assert_receive {:agent_harness, ^ref,
+                    %Event{type: :request_created, data: %Request{} = request}}
+
+    assert :ok = AgentHarness.cancel(turn)
+    assert_receive {:agent_harness, ^ref, %Event{type: :cancel_requested}}
+    assert_receive {:agent_harness, ^ref, %Event{type: :request_expired}}
+    assert {:error, :request_expired} = AgentHarness.respond(request, Response.approve())
+
+    Provider.Sink.request(sink, turn.id, :late,
+      kind: :permission,
+      prompt: "Too late?"
+    )
+
+    refute_receive {:agent_harness, ^ref, %Event{type: :request_created}}, 20
+    assert %{status: :cancelling, pending_requests: []} = AgentHarness.status(session)
+    assert :ok = AgentHarness.cancel(turn)
+
+    Provider.Sink.finish(sink, turn.id, :interrupted)
+    assert_receive {:agent_harness, ^ref, %Event{type: :turn_interrupted}}
+    assert :ok = AgentHarness.stop_session(session)
+  end
+
+  test "a turn id cannot be reused within a session" do
+    test_pid = self()
+
+    expect(ProviderMock, :open_session, fn _config, sink ->
+      send(test_pid, {:sink, sink})
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :start_turn, fn :provider_handle, _turn, "First", [] ->
+      {:ok, "provider-turn-1"}
+    end)
+
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    {:ok, session} = AgentHarness.start_session(:test, provider_module: ProviderMock)
+    assert_receive {:sink, sink}
+    {:ok, first} = AgentHarness.start_turn(session, "First", id: "turn-1")
+    Provider.Sink.finish(sink, first.id, :completed, %{generation: 1})
+    assert {:ok, %{result: %{generation: 1}}} = AgentHarness.await(first, timeout: 1_000)
+
+    assert {:error, {:turn_id_already_used, "turn-1"}} =
+             AgentHarness.start_turn(session, "Second", id: "turn-1")
+
+    assert %{status: :idle, current_turn: nil} = AgentHarness.status(session)
     assert :ok = AgentHarness.stop_session(session)
   end
 end

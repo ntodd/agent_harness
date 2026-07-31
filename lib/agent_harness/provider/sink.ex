@@ -10,12 +10,21 @@ defmodule AgentHarness.Provider.Sink do
   defstruct [:pid, :ref]
 
   @type t :: %__MODULE__{pid: pid(), ref: reference()}
+  @terminal_event_types [:turn_completed, :turn_failed, :turn_cancelled, :turn_interrupted]
 
   @spec new(pid()) :: t()
   def new(pid) when is_pid(pid), do: %__MODULE__{pid: pid, ref: make_ref()}
 
-  @spec emit(t(), String.t(), atom(), term(), term()) :: :ok
-  def emit(%__MODULE__{} = sink, turn_id, type, data \\ %{}, raw \\ nil)
+  @spec emit(t(), String.t(), atom(), term(), term()) ::
+          :ok | {:error, :reserved_event_type}
+  def emit(sink, turn_id, type, data \\ %{}, raw \\ nil)
+
+  def emit(%__MODULE__{}, _turn_id, type, _data, _raw)
+      when type in @terminal_event_types do
+    {:error, :reserved_event_type}
+  end
+
+  def emit(%__MODULE__{} = sink, turn_id, type, data, raw)
       when is_binary(turn_id) and is_atom(type) do
     deliver(sink, {:event, turn_id, type, data, raw})
   end

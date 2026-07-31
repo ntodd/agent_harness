@@ -61,4 +61,98 @@ defmodule AgentHarness.StreamTest do
 
     assert :ok = AgentHarness.stop_session(session, force: true)
   end
+
+  @tag capture_log: true
+  test "await returns when its SessionServer exits without a terminal event" do
+    expect(ProviderMock, :open_session, fn _config, _sink ->
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :start_turn, fn :provider_handle, _turn, "Crash", [] ->
+      {:ok, "provider-turn-1"}
+    end)
+
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    {:ok, session} = AgentHarness.start_session(:test, provider_module: ProviderMock)
+    {:ok, turn} = AgentHarness.start_turn(session, "Crash")
+    test_pid = self()
+
+    task =
+      Task.async(fn ->
+        send(test_pid, :await_started)
+        AgentHarness.await(turn)
+      end)
+
+    assert_receive :await_started
+    session_pid = AgentHarness.whereis(session.id)
+    wait_for_subscription(session_pid)
+    :ok = GenServer.stop(session_pid, :store_failed)
+
+    assert {:error, {:session_down, :store_failed}} = Task.await(task, 1_000)
+  end
+
+  @tag capture_log: true
+  test "a stream raises when its SessionServer exits without a terminal event" do
+    test_pid = self()
+
+    expect(ProviderMock, :open_session, fn _config, _sink ->
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :start_turn, fn :provider_handle, _turn, "Crash stream", [] ->
+      {:ok, "provider-turn-1"}
+    end)
+
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    {:ok, session} = AgentHarness.start_session(:test, provider_module: ProviderMock)
+    {:ok, turn} = AgentHarness.start_turn(session, "Crash stream")
+
+    task =
+      Task.Supervisor.async_nolink(AgentHarness.RunnerSupervisor, fn ->
+        {:ok, stream} = AgentHarness.stream(turn)
+        send(test_pid, :stream_started)
+        Enum.to_list(stream)
+      end)
+
+    assert_receive :stream_started
+    session_pid = AgentHarness.whereis(session.id)
+    :ok = GenServer.stop(session_pid, :store_failed)
+
+    assert {:exit, {%AgentHarness.SessionDownError{reason: :store_failed}, _stacktrace}} =
+             Task.yield(task, 1_000)
+  end
+
+  test "subscriptions reject invalid replay cursors and unknown turns" do
+    expect(ProviderMock, :open_session, fn _config, _sink ->
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    {:ok, session} = AgentHarness.start_session(:test, provider_module: ProviderMock)
+
+    assert {:error, {:invalid_replay_cursor, :yesterday}} =
+             AgentHarness.subscribe(session, from: :yesterday)
+
+    missing_turn = AgentHarness.Turn.new(session.id, "Missing", id: "missing")
+    assert {:error, :turn_not_found} = AgentHarness.subscribe(missing_turn, from: :start)
+    assert :ok = AgentHarness.stop_session(session)
+  end
+
+  defp wait_for_subscription(session_pid, attempts \\ 50)
+
+  defp wait_for_subscription(_session_pid, 0), do: flunk("await did not subscribe")
+
+  defp wait_for_subscription(session_pid, attempts) do
+    case :sys.get_state(session_pid).subscriptions do
+      subscriptions when map_size(subscriptions) > 0 ->
+        :ok
+
+      _subscriptions ->
+        Process.sleep(2)
+        wait_for_subscription(session_pid, attempts - 1)
+    end
+  end
 end

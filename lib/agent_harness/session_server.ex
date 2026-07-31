@@ -72,32 +72,26 @@ defmodule AgentHarness.SessionServer do
     provider = Keyword.fetch!(opts, :provider)
     sink = Sink.new(self())
 
-    case provider.open_session(config, sink) do
-      {:ok, provider_handle, info} ->
-        state = %State{
-          session: session,
-          config: config,
-          provider: provider,
-          provider_handle: provider_handle,
-          provider_monitor: monitor_provider(provider_handle),
-          provider_session_id: Map.get(info, :provider_session_id),
-          sink: sink,
-          event_buffer: EventBuffer.new(config.event_buffer_size),
-          store: config.store,
-          created_at: DateTime.utc_now()
-        }
+    with :ok <- ensure_unused_session_id(config.store, session.id) do
+      case provider.open_session(config, sink) do
+        {:ok, provider_handle, info} ->
+          initialize_open_session(
+            session,
+            config,
+            provider,
+            provider_handle,
+            info,
+            sink
+          )
 
-        :ok = persist_session(state)
+        {:error, reason} ->
+          {:stop, {:provider_open_failed, reason}}
 
-        state =
-          emit(state, nil, :session_ready, %{
-            provider_session_id: state.provider_session_id
-          })
-
-        {:ok, state}
-
-      {:error, reason} ->
-        {:stop, {:provider_open_failed, reason}}
+        other ->
+          {:stop, {:provider_open_failed, {:invalid_return, other}}}
+      end
+    else
+      {:error, reason} -> {:stop, reason}
     end
   end
 
@@ -138,32 +132,10 @@ defmodule AgentHarness.SessionServer do
     turn = Turn.new(state.session.id, input, turn_opts)
     provider_opts = Keyword.drop(opts, [:id, :metadata])
 
-    case state.provider.start_turn(state.provider_handle, turn, input, provider_opts) do
-      {:ok, provider_turn_ref} ->
-        now = DateTime.utc_now()
-        turn = %{turn | status: :running, started_at: now}
-
-        state = %{
-          state
-          | status: :running,
-            current_turn: turn,
-            provider_turn_ref: provider_turn_ref,
-            turns: Map.put(state.turns, turn.id, turn)
-        }
-
-        :ok = persist_turn(state, turn)
-        :ok = persist_session(state)
-
-        state =
-          emit(state, turn.id, :turn_started, %{
-            turn: turn,
-            provider_turn_ref: provider_turn_ref
-          })
-
-        {:reply, {:ok, turn}, state}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+    if Map.has_key?(state.turns, turn.id) do
+      {:reply, {:error, {:turn_id_already_used, turn.id}}, state}
+    else
+      start_provider_turn(state, turn, input, provider_opts)
     end
   end
 
@@ -176,28 +148,16 @@ defmodule AgentHarness.SessionServer do
   end
 
   def handle_call({:subscribe, pid, turn_id, from}, _from, state) when is_pid(pid) do
-    subscription = %Subscription{
-      ref: make_ref(),
-      session_id: state.session.id,
-      turn_id: turn_id,
-      pid: pid
-    }
+    cond do
+      not valid_replay_cursor?(from) ->
+        {:reply, {:error, {:invalid_replay_cursor, from}}, state}
 
-    monitor = Process.monitor(pid)
-    subscriber = %{pid: pid, monitor: monitor, turn_id: turn_id}
+      is_binary(turn_id) and not Map.has_key?(state.turns, turn_id) ->
+        {:reply, {:error, :turn_not_found}, state}
 
-    state = %{
-      state
-      | subscriptions: Map.put(state.subscriptions, subscription.ref, subscriber),
-        monitors: Map.put(state.monitors, monitor, subscription.ref)
-    }
-
-    state
-    |> replay_events(from)
-    |> Enum.filter(&matches_turn?(&1, turn_id))
-    |> Enum.each(&deliver(subscription.ref, pid, &1))
-
-    {:reply, {:ok, subscription}, state}
+      true ->
+        subscribe(state, pid, turn_id, from)
+    end
   end
 
   def handle_call({:unsubscribe, subscription_ref}, _from, state) do
@@ -214,6 +174,9 @@ defmodule AgentHarness.SessionServer do
 
       %Request{status: :expired} ->
         {:reply, {:error, :request_expired}, state}
+
+      %Request{status: :pending} when state.status == :cancelling ->
+        {:reply, {:error, :turn_cancelling}, state}
 
       %Request{status: :pending} = request ->
         respond_to_request(state, request, response)
@@ -269,7 +232,7 @@ defmodule AgentHarness.SessionServer do
         {:agent_harness_provider, sink_ref, {:request, turn_id, provider_ref, attrs, raw}},
         %State{sink: %Sink{ref: sink_ref}} = state
       ) do
-    if current_turn?(state, turn_id) do
+    if current_turn?(state, turn_id) and state.status != :cancelling do
       request_opts =
         attrs
         |> Keyword.delete(:id)
@@ -375,6 +338,131 @@ defmodule AgentHarness.SessionServer do
     state.provider.close_session(state.provider_handle)
   end
 
+  defp initialize_open_session(
+         session,
+         config,
+         provider,
+         provider_handle,
+         info,
+         sink
+       ) do
+    state = %State{
+      session: session,
+      config: config,
+      provider: provider,
+      provider_handle: provider_handle,
+      provider_monitor: monitor_provider(provider_handle),
+      provider_session_id: Map.get(info, :provider_session_id),
+      sink: sink,
+      event_buffer: EventBuffer.new(config.event_buffer_size),
+      store: config.store,
+      created_at: DateTime.utc_now()
+    }
+
+    try do
+      :ok = persist_session(state)
+
+      state =
+        emit(state, nil, :session_ready, %{
+          provider_session_id: state.provider_session_id
+        })
+
+      {:ok, state}
+    rescue
+      error ->
+        safe_close_provider(provider, provider_handle)
+
+        {:stop,
+         {:session_initialization_failed,
+          {:exception, error.__struct__, Exception.message(error)}}}
+    catch
+      kind, reason ->
+        safe_close_provider(provider, provider_handle)
+        {:stop, {:session_initialization_failed, {kind, reason}}}
+    end
+  end
+
+  defp ensure_unused_session_id(false, _session_id), do: :ok
+
+  defp ensure_unused_session_id({module, owner}, session_id) do
+    case module.fetch_session(owner, session_id) do
+      :not_found -> :ok
+      {:ok, _snapshot} -> {:error, :session_id_already_used}
+      {:error, reason} -> {:error, {:store_read_failed, reason}}
+      other -> {:error, {:invalid_store_response, other}}
+    end
+  rescue
+    error ->
+      {:error, {:store_read_failed, {:exception, error.__struct__, Exception.message(error)}}}
+  catch
+    kind, reason ->
+      {:error, {:store_read_failed, {kind, reason}}}
+  end
+
+  defp safe_close_provider(provider, provider_handle) do
+    provider.close_session(provider_handle)
+  rescue
+    _error -> :ok
+  catch
+    _kind, _reason -> :ok
+  end
+
+  defp subscribe(state, pid, turn_id, from) do
+    subscription = %Subscription{
+      ref: make_ref(),
+      session_id: state.session.id,
+      turn_id: turn_id,
+      pid: pid,
+      server: self()
+    }
+
+    monitor = Process.monitor(pid)
+    subscriber = %{pid: pid, monitor: monitor, turn_id: turn_id}
+
+    state = %{
+      state
+      | subscriptions: Map.put(state.subscriptions, subscription.ref, subscriber),
+        monitors: Map.put(state.monitors, monitor, subscription.ref)
+    }
+
+    state
+    |> replay_events(from)
+    |> Enum.filter(&matches_turn?(&1, turn_id))
+    |> Enum.each(&deliver(subscription.ref, pid, &1))
+
+    {:reply, {:ok, subscription}, state}
+  end
+
+  defp start_provider_turn(state, turn, input, provider_opts) do
+    case state.provider.start_turn(state.provider_handle, turn, input, provider_opts) do
+      {:ok, provider_turn_ref} ->
+        now = DateTime.utc_now()
+        turn = %{turn | status: :running, started_at: now}
+
+        state = %{
+          state
+          | status: :running,
+            current_turn: turn,
+            provider_turn_ref: provider_turn_ref,
+            turns: Map.put(state.turns, turn.id, turn)
+        }
+
+        :ok = persist_turn(state, turn)
+        :ok = persist_session(state)
+
+        state =
+          emit(state, turn.id, :turn_started, %{
+            turn: turn,
+            provider_turn_ref: provider_turn_ref
+          })
+
+        {:reply, {:ok, turn}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
   defp via(session_id) do
     {:via, Registry, {AgentHarness.SessionRegistry, session_id}}
   end
@@ -435,7 +523,9 @@ defmodule AgentHarness.SessionServer do
 
         :ok = persist_turn(state, turn)
         :ok = persist_session(state)
-        {:reply, :ok, emit(state, state.current_turn.id, :cancel_requested)}
+
+        state = emit(state, state.current_turn.id, :cancel_requested)
+        {:reply, :ok, expire_pending_requests(state, state.current_turn.id)}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -581,7 +671,7 @@ defmodule AgentHarness.SessionServer do
   end
 
   defp replay_events(%State{store: {module, owner}} = state, :start) do
-    case module.events(owner, state.session.id) do
+    case module.events(owner, state.session.id, []) do
       {:ok, events} -> events
       {:error, _reason} -> EventBuffer.from(state.event_buffer, :start)
     end
@@ -598,6 +688,15 @@ defmodule AgentHarness.SessionServer do
   defp matches_turn?(_event, nil), do: true
   defp matches_turn?(%Event{turn_id: turn_id}, turn_id), do: true
   defp matches_turn?(_event, _turn_id), do: false
+
+  defp valid_replay_cursor?(:latest), do: true
+  defp valid_replay_cursor?(:start), do: true
+
+  defp valid_replay_cursor?({:after, sequence})
+       when is_integer(sequence) and sequence >= 0,
+       do: true
+
+  defp valid_replay_cursor?(_cursor), do: false
 
   defp deliver(subscription_ref, pid, event) do
     send(pid, {:agent_harness, subscription_ref, event})

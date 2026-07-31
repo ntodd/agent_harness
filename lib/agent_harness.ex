@@ -92,7 +92,7 @@ defmodule AgentHarness do
     with {:ok, subscription} <- subscribe(turn, subscription_opts) do
       stream =
         Stream.resource(
-          fn -> {:open, subscription} end,
+          fn -> {:open, subscription, Process.monitor(subscription.server)} end,
           &stream_next(&1, timeout),
           &close_stream/1
         )
@@ -110,10 +110,12 @@ defmodule AgentHarness do
 
     with {:ok, subscription} <- subscribe(turn, from: :start) do
       deadline = deadline(timeout)
+      monitor = Process.monitor(subscription.server)
 
       try do
-        await_terminal(subscription, deadline)
+        await_terminal(subscription, monitor, deadline)
       after
+        Process.demonitor(monitor, [:flush])
         unsubscribe(subscription)
       end
     end
@@ -128,7 +130,9 @@ defmodule AgentHarness do
   end
 
   @doc """
-  Requests cancellation and waits for the provider's terminal event.
+  Requests cancellation.
+
+  The session remains cancelling until the provider emits a terminal event.
   """
   @spec cancel(Turn.t()) :: :ok | {:error, term()}
   def cancel(%Turn{session_id: session_id, id: turn_id}) do
@@ -187,29 +191,35 @@ defmodule AgentHarness do
     end
   end
 
-  defp stream_next({:done, subscription}, _timeout) do
-    {:halt, {:done, subscription}}
+  defp stream_next({:done, subscription, monitor}, _timeout) do
+    {:halt, {:done, subscription, monitor}}
   end
 
-  defp stream_next({:open, subscription}, timeout) do
-    case receive_event(subscription, timeout) do
+  defp stream_next({:open, subscription, monitor}, timeout) do
+    case receive_event(subscription, monitor, timeout) do
       {:ok, event} when event.type in @terminal_events ->
-        {[event], {:done, subscription}}
+        {[event], {:done, subscription, monitor}}
 
       {:ok, event} ->
-        {[event], {:open, subscription}}
+        {[event], {:open, subscription, monitor}}
+
+      {:down, reason} ->
+        raise AgentHarness.SessionDownError, reason: reason
 
       :timeout ->
         raise AgentHarness.StreamTimeoutError, timeout: timeout
     end
   end
 
-  defp close_stream({_status, subscription}), do: unsubscribe(subscription)
+  defp close_stream({_status, subscription, monitor}) do
+    Process.demonitor(monitor, [:flush])
+    unsubscribe(subscription)
+  end
 
-  defp await_terminal(subscription, deadline) do
+  defp await_terminal(subscription, monitor, deadline) do
     timeout = remaining(deadline)
 
-    case receive_event(subscription, timeout) do
+    case receive_event(subscription, monitor, timeout) do
       {:ok, %Event{type: :turn_completed, data: result}} ->
         {:ok, result}
 
@@ -217,22 +227,27 @@ defmodule AgentHarness do
         {:error, event}
 
       {:ok, _event} ->
-        await_terminal(subscription, deadline)
+        await_terminal(subscription, monitor, deadline)
+
+      {:down, reason} ->
+        {:error, {:session_down, reason}}
 
       :timeout ->
         {:error, :timeout}
     end
   end
 
-  defp receive_event(%Subscription{ref: subscription_ref}, :infinity) do
+  defp receive_event(%Subscription{ref: subscription_ref}, monitor, :infinity) do
     receive do
       {:agent_harness, ^subscription_ref, %Event{} = event} -> {:ok, event}
+      {:DOWN, ^monitor, :process, _pid, reason} -> {:down, reason}
     end
   end
 
-  defp receive_event(%Subscription{ref: subscription_ref}, timeout) do
+  defp receive_event(%Subscription{ref: subscription_ref}, monitor, timeout) do
     receive do
       {:agent_harness, ^subscription_ref, %Event{} = event} -> {:ok, event}
+      {:DOWN, ^monitor, :process, _pid, reason} -> {:down, reason}
     after
       timeout -> :timeout
     end

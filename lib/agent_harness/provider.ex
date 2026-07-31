@@ -2,10 +2,10 @@ defmodule AgentHarness.Provider do
   @moduledoc """
   Behaviour implemented by coding-agent provider adapters.
 
-  `open_session/2` runs in a bounded startup task. Other provider callbacks
-  acknowledge commands quickly. Long-running I/O belongs in provider-owned
-  processes which publish normalized messages through
-  `AgentHarness.Provider.Sink`.
+  Lifecycle and command callbacks run in bounded, session-owned tasks.
+  `capabilities/1` runs directly in the SessionServer and must return without
+  blocking. Long-running I/O belongs in provider-owned processes which publish
+  normalized messages through `AgentHarness.Provider.Sink`.
 
   A PID handle is monitored automatically. For an opaque handle, return a
   runtime PID as `session_info.monitor`; otherwise the adapter must report
@@ -17,6 +17,12 @@ defmodule AgentHarness.Provider do
   `{:error, {:turn_start_uncertain, reason}}`. AgentHarness records a terminal
   failure and retires that provider session so potentially running work cannot
   be mistaken for a reusable idle conversation.
+
+  If `respond/3` or `cancel/2` cannot determine whether the command reached the
+  provider, return `{:error, {:provider_command_uncertain, reason}}`. A plain
+  `{:error, reason}` from `respond/3` means the response was definitely rejected
+  and may be attempted again. Cancellation failures retire the provider session
+  because the upstream turn may still be running.
   """
 
   alias AgentHarness.{Capabilities, Response, SessionConfig, Turn}
@@ -40,6 +46,6 @@ defmodule AgentHarness.Provider do
               :ok | {:error, term()}
 
   @callback cancel(handle(), provider_turn_ref()) :: :ok | {:error, term()}
-  @callback close_session(handle()) :: :ok
+  @callback close_session(handle()) :: :ok | {:error, term()}
   @callback capabilities(handle()) :: Capabilities.t()
 end

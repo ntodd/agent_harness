@@ -49,15 +49,20 @@ defmodule AgentHarness.Providers.Codex do
 
   @impl true
   def respond(session, provider_request_ref, %Response{} = response) do
-    call(session, {:respond, provider_request_ref, response})
+    session
+    |> call({:respond, provider_request_ref, response})
+    |> normalize_provider_command_result()
   end
 
   @impl true
   def cancel(session, provider_turn_ref) do
-    call(session, {:cancel, provider_turn_ref})
+    session
+    |> call({:cancel, provider_turn_ref})
+    |> normalize_provider_command_result()
   end
 
   @impl true
+  @spec close_session(pid()) :: :ok | {:error, term()}
   def close_session(session) do
     case call(session, :close) do
       {:error, :provider_not_found} -> :ok
@@ -80,4 +85,14 @@ defmodule AgentHarness.Providers.Codex do
   defp call_timeout do
     Application.get_env(:agent_harness, :codex_call_timeout, @default_call_timeout)
   end
+
+  defp normalize_provider_command_result({:error, :provider_call_timeout}) do
+    {:error, {:provider_command_uncertain, :provider_call_timeout}}
+  end
+
+  defp normalize_provider_command_result({:error, {:provider_call_failed, _reason} = failure}) do
+    {:error, {:provider_command_uncertain, failure}}
+  end
+
+  defp normalize_provider_command_result(result), do: result
 end

@@ -2,8 +2,10 @@ defmodule AgentHarness.SessionRef do
   @moduledoc """
   Stable public reference to a supervised logical agent session.
 
-  References deliberately contain no process identifier so a session process
-  may be restarted or passivated without invalidating callers' handles.
+  References deliberately contain no process identifier, keeping callers
+  decoupled from process ownership and leaving room for restart or passivation
+  without changing the handle shape. AgentHarness v0.1 does not automatically
+  restart, rehydrate, or passivate sessions.
   """
 
   alias AgentHarness.ID

@@ -15,13 +15,29 @@ defmodule AgentHarness.SessionServer do
     Turn
   }
 
-  alias AgentHarness.Provider.Sink
   alias AgentHarness.Internal.OwnedTask
+  alias AgentHarness.Provider.Sink
 
   defmodule CompletedTurnCache do
     @moduledoc false
 
     defstruct events: %{}, order: :queue.new(), count: 0, pruned?: false
+  end
+
+  defmodule ProviderCommand do
+    @moduledoc false
+
+    @enforce_keys [:task, :timer, :kind, :turn_id, :started_monotonic]
+    defstruct [
+      :task,
+      :timer,
+      :kind,
+      :turn_id,
+      :request_id,
+      :response,
+      :from,
+      :started_monotonic
+    ]
   end
 
   defmodule State do
@@ -37,6 +53,10 @@ defmodule AgentHarness.SessionServer do
       :created_at,
       :config_fingerprint
     ]
+    # This private aggregate makes lifecycle invariants explicit at the update
+    # sites; splitting fields across opaque nested maps would make races harder
+    # to audit.
+    # credo:disable-for-next-line Credo.Check.Warning.StructFieldAmount
     defstruct [
       :session,
       :config,
@@ -52,6 +72,7 @@ defmodule AgentHarness.SessionServer do
       :open_failure,
       :startup_finalization_task,
       :startup_finalization_timer,
+      :startup_attempt_id,
       :startup_replacement,
       :startup_replacement_marker,
       :startup_rollback_task,
@@ -71,6 +92,7 @@ defmodule AgentHarness.SessionServer do
       turns: %{},
       completed_turn_cache: %CompletedTurnCache{},
       requests: %{},
+      provider_commands: %{},
       subscriptions: %{},
       monitors: %{},
       deferred_provider_messages: :queue.new(),
@@ -87,7 +109,7 @@ defmodule AgentHarness.SessionServer do
       id: {__MODULE__, session.id},
       start: {__MODULE__, :start_link, [opts]},
       restart: :temporary,
-      shutdown: Application.get_env(:agent_harness, :session_shutdown_timeout, 20_000),
+      shutdown: Application.get_env(:agent_harness, :session_shutdown_timeout, 60_000),
       type: :worker
     }
   end
@@ -120,6 +142,7 @@ defmodule AgentHarness.SessionServer do
       store: config.store,
       durability: if(config.store == false, do: :disabled, else: :durable),
       created_at: created_at,
+      startup_attempt_id: AgentHarness.ID.generate(),
       config_fingerprint: config_fingerprint(config)
     }
 
@@ -262,7 +285,7 @@ defmodule AgentHarness.SessionServer do
     {:reply, :ok, remove_subscription(state, subscription_ref)}
   end
 
-  def handle_call({:respond, request_id, response}, _from, state) do
+  def handle_call({:respond, request_id, response}, from, state) do
     case lookup_request(state, request_id) do
       :not_found ->
         {:reply, {:error, :request_not_found}, state}
@@ -283,7 +306,7 @@ defmodule AgentHarness.SessionServer do
         {:reply, {:error, :turn_cancelling}, state}
 
       {:hot, %Request{status: :pending} = request} ->
-        respond_to_request(state, request, response)
+        start_request_response(state, request, response, from)
     end
   end
 
@@ -303,38 +326,11 @@ defmodule AgentHarness.SessionServer do
     {:reply, {:error, :turn_in_progress}, state}
   end
 
-  def handle_call({:stop, true}, _from, %State{current_turn: nil} = state) do
-    {:stop, :normal, :ok, close_state(state)}
-  end
-
-  def handle_call({:stop, true}, _from, %State{turn_start_task: %Task{} = task} = state) do
-    _ = Task.shutdown(task, :brutal_kill)
-    cancel_timer(state.turn_start_timer)
-
-    state = %{
-      state
-      | turn_start_task: nil,
-        turn_start_timer: nil,
-        deferred_provider_messages: :queue.new()
-    }
-
-    state = emit(state, state.current_turn.id, :cancel_requested, %{forced: true})
-    state = expire_pending_requests(state, state.current_turn.id)
-    state = complete_turn(state, state.current_turn.id, :cancelled, %{forced: true}, nil)
-    {:stop, :normal, :ok, close_state(state)}
-  end
-
   def handle_call({:stop, true}, _from, state) do
-    case state.provider.cancel(state.provider_handle, state.provider_turn_ref) do
-      :ok ->
-        state = emit(state, state.current_turn.id, :cancel_requested)
-        state = expire_pending_requests(state, state.current_turn.id)
-        state = complete_turn(state, state.current_turn.id, :cancelled, %{forced: true}, nil)
-        {:stop, :normal, :ok, close_state(state)}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-    end
+    state = abort_all_provider_commands(state, {:error, :session_stopping})
+    state = stop_turn_start_task(state)
+    state = interrupt_current_turn(state, :forced_session_stop)
+    {:stop, :normal, :ok, close_state(state)}
   end
 
   @impl true
@@ -395,6 +391,19 @@ defmodule AgentHarness.SessionServer do
   end
 
   def handle_info(
+        {task_ref, result},
+        %State{provider_commands: provider_commands} = state
+      )
+      when is_map_key(provider_commands, task_ref) do
+    {command, state} = pop_provider_command(state, task_ref, demonitor?: true)
+    finish_provider_command(state, command, result)
+  end
+
+  def handle_info({task_ref, _stale_result}, state) when is_reference(task_ref) do
+    {:noreply, state}
+  end
+
+  def handle_info(
         {:provider_open_timeout, task_ref},
         %State{open_task: %Task{ref: task_ref} = task} = state
       ) do
@@ -448,28 +457,53 @@ defmodule AgentHarness.SessionServer do
         {:provider_turn_start_timeout, task_ref},
         %State{turn_start_task: %Task{ref: task_ref} = task} = state
       ) do
-    _ = Task.shutdown(task, :brutal_kill)
-
     state = %{
       state
       | turn_start_task: nil,
-        turn_start_timer: nil,
-        deferred_provider_messages: :queue.new()
+        turn_start_timer: nil
     }
 
-    retire_uncertain_turn_start(
-      state,
-      :provider_turn_start_timeout,
-      :provider_turn_start_timeout
-    )
+    case shutdown_task_result(task) do
+      {:ok, result} ->
+        case finish_turn_start(state, result) do
+          {:stop, reason, state} -> {:stop, reason, state}
+          state -> {:noreply, state}
+        end
+
+      _not_completed ->
+        state = %{state | deferred_provider_messages: :queue.new()}
+
+        retire_uncertain_turn_start(
+          state,
+          :provider_turn_start_timeout,
+          :provider_turn_start_timeout
+        )
+    end
   end
 
   def handle_info({:provider_turn_start_timeout, _stale_ref}, state), do: {:noreply, state}
 
   def handle_info(
+        {:provider_command_timeout, task_ref},
+        %State{provider_commands: provider_commands} = state
+      )
+      when is_map_key(provider_commands, task_ref) do
+    {command, state} = pop_provider_command(state, task_ref)
+
+    case shutdown_task_result(command.task) do
+      {:ok, result} -> finish_provider_command(state, command, result)
+      _not_completed -> fail_uncertain_provider_command(state, command, :provider_command_timeout)
+    end
+  end
+
+  def handle_info({:provider_command_timeout, _stale_ref}, state), do: {:noreply, state}
+
+  def handle_info(
         {__MODULE__, starter_ref, :starter_ack},
-        %State{starter: {_pid, starter_ref}} = state
+        %State{starter: {starter, starter_ref}} = state
       ) do
+    state = clear_startup_tracking(state)
+    send(starter, {__MODULE__, starter_ref, :starter_acknowledged})
     {:noreply, clear_starter(state)}
   end
 
@@ -631,6 +665,16 @@ defmodule AgentHarness.SessionServer do
 
   def handle_info(
         {:DOWN, monitor, :process, _pid, reason},
+        %State{provider_commands: provider_commands} = state
+      )
+      when is_map_key(provider_commands, monitor) do
+    {command, state} = pop_provider_command(state, monitor)
+    failure = {:provider_command_task_down, reason}
+    fail_uncertain_provider_command(state, command, failure)
+  end
+
+  def handle_info(
+        {:DOWN, monitor, :process, _pid, reason},
         %State{provider_monitor: monitor} = state
       ) do
     state = %{state | provider_monitor: nil}
@@ -669,39 +713,6 @@ defmodule AgentHarness.SessionServer do
     end
   end
 
-  def handle_info(
-        {:EXIT, pid, reason},
-        %State{open_task: %Task{pid: pid}} = state
-      )
-      when reason != :normal do
-    cancel_timer(state.open_timer)
-    failure = {:provider_open_task_down, reason}
-    notify_starter(state, {:error, failure})
-
-    {:stop, :normal,
-     state
-     |> clear_starter()
-     |> Map.merge(%{open_task: nil, open_timer: nil})}
-  end
-
-  def handle_info(
-        {:EXIT, pid, reason},
-        %State{turn_start_task: %Task{pid: pid}} = state
-      )
-      when reason != :normal do
-    cancel_timer(state.turn_start_timer)
-
-    state = %{
-      state
-      | turn_start_task: nil,
-        turn_start_timer: nil,
-        deferred_provider_messages: :queue.new()
-    }
-
-    failure = {:provider_turn_start_task_down, reason}
-    retire_uncertain_turn_start(state, failure, {:provider_turn_start_uncertain, failure})
-  end
-
   # Keep this catch-all last so linked provider implementations can use normal
   # OTP shutdown without crashing a trapping SessionServer.
   def handle_info({:EXIT, _pid, :normal}, state), do: {:noreply, state}
@@ -731,8 +742,10 @@ defmodule AgentHarness.SessionServer do
     shutdown_task(state.startup_finalization_task)
     shutdown_task(state.startup_rollback_task)
     shutdown_task(state.turn_start_task)
+    state = abort_all_provider_commands(state, {:error, :session_stopping})
 
-    state = maybe_persist_shutdown(reason, state)
+    {state, startup_rollback?} = rollback_unacknowledged_startup(state)
+    state = if startup_rollback?, do: state, else: maybe_persist_shutdown(reason, state)
 
     if state.provider_handle do
       safe_close_provider(state.provider, state.provider_handle)
@@ -762,6 +775,8 @@ defmodule AgentHarness.SessionServer do
          {:ok, provider_handle, _info, _replacement}
        )
        when not is_nil(reason) do
+    notify_starter(state, {:phase, :finalizing})
+
     safe_close_provider(
       state.provider,
       provider_handle,
@@ -903,7 +918,6 @@ defmodule AgentHarness.SessionServer do
       |> Map.put(:status, :idle)
       |> publish_event(event)
       |> start_session_telemetry()
-      |> clear_startup_tracking()
 
     pending_attrs = state.open_session_attrs
     state = %{state | open_session_attrs: %{}}
@@ -952,30 +966,28 @@ defmodule AgentHarness.SessionServer do
   defp startup_rollback_required?(_state), do: false
 
   defp start_startup_rollback(%State{store: {module, owner}} = state) do
-    try do
-      task =
-        OwnedTask.async_nolink(AgentHarness.RunnerSupervisor, fn ->
-          telemetry_store_write(state, :delete_session, fn ->
-            module.delete_session(owner, state.session.id)
-          end)
+    task =
+      OwnedTask.async_nolink(AgentHarness.RunnerSupervisor, fn ->
+        telemetry_store_write(state, :delete_session, fn ->
+          module.delete_session(owner, state.session.id)
         end)
+      end)
 
-      timer =
-        Process.send_after(
-          self(),
-          {:startup_rollback_timeout, task.ref},
-          state.config.startup_finalization_timeout
-        )
+    timer =
+      Process.send_after(
+        self(),
+        {:startup_rollback_timeout, task.ref},
+        state.config.startup_finalization_timeout
+      )
 
-      {:noreply,
-       %{
-         state
-         | startup_rollback_task: task,
-           startup_rollback_timer: timer
-       }}
-    catch
-      :exit, reason -> finish_startup_rollback(state, {:error, {:task_failed, reason}})
-    end
+    {:noreply,
+     %{
+       state
+       | startup_rollback_task: task,
+         startup_rollback_timer: timer
+     }}
+  catch
+    :exit, reason -> finish_startup_rollback(state, {:error, {:task_failed, reason}})
   end
 
   defp finish_startup_rollback(state, result) do
@@ -1017,7 +1029,6 @@ defmodule AgentHarness.SessionServer do
       state
       |> publish_event(startup_ready_event(state))
       |> start_session_telemetry()
-      |> clear_startup_tracking()
 
     state =
       if map_size(pending_attrs) > 0 do
@@ -1053,6 +1064,47 @@ defmodule AgentHarness.SessionServer do
     min(configured, state.config.startup_finalization_timeout)
   end
 
+  defp rollback_unacknowledged_startup(state) do
+    if startup_rollback_required?(state) do
+      result = delete_unacknowledged_startup(state)
+
+      if result != :ok do
+        Logger.warning(
+          "AgentHarness unacknowledged startup rollback failed " <>
+            "session_id=#{state.session.id} provider=#{state.session.provider} " <>
+            "reason=#{inspect(result)}"
+        )
+      end
+
+      {state, true}
+    else
+      {state, false}
+    end
+  end
+
+  defp delete_unacknowledged_startup(%State{store: {module, owner}} = state) do
+    callback = fn ->
+      telemetry_store_write(state, :delete_session, fn ->
+        module.delete_session(owner, state.session.id)
+      end)
+    end
+
+    with {:ok, task} <- start_provider_command_task(callback) do
+      case Task.yield(task, startup_cleanup_timeout(state)) do
+        {:ok, result} -> result
+        {:exit, reason} -> {:error, {:rollback_task_down, reason}}
+        nil -> finish_shutdown_rollback(task)
+      end
+    end
+  end
+
+  defp finish_shutdown_rollback(task) do
+    case shutdown_task_result(task) do
+      {:ok, result} -> result
+      _not_completed -> {:error, :rollback_timeout}
+    end
+  end
+
   defp start_session_telemetry(state) do
     started_at =
       Telemetry.start([:session], %{
@@ -1066,7 +1118,8 @@ defmodule AgentHarness.SessionServer do
   defp clear_startup_tracking(state) do
     %{
       state
-      | startup_replacement: nil,
+      | startup_attempt_id: nil,
+        startup_replacement: nil,
         startup_replacement_marker: nil,
         startup_failure: nil
     }
@@ -1099,6 +1152,12 @@ defmodule AgentHarness.SessionServer do
     case module.fetch_session(owner, session_id) do
       :not_found ->
         {:ok, :none}
+
+      # Registration guarantees the prior SessionServer is no longer live.
+      # A pending startup marker is therefore an abandoned attempt, even if
+      # its final write reached :idle immediately before an untrappable death.
+      {:ok, %{startup: %{acknowledged: false}}} ->
+        {:ok, :replace}
 
       {:ok, %{status: :closed}} when reuse in [:closed, :replace] ->
         {:ok, :replace}
@@ -1135,7 +1194,7 @@ defmodule AgentHarness.SessionServer do
 
   defp safe_close_provider(provider, provider_handle, timeout) do
     task =
-      Task.Supervisor.async(AgentHarness.RunnerSupervisor, fn ->
+      OwnedTask.async_nolink(AgentHarness.RunnerSupervisor, fn ->
         provider.close_session(provider_handle)
       end)
 
@@ -1419,7 +1478,7 @@ defmodule AgentHarness.SessionServer do
 
   defp start_turn_task(state, turn, input, provider_opts) do
     {:ok,
-     Task.Supervisor.async(AgentHarness.RunnerSupervisor, fn ->
+     OwnedTask.async_nolink(AgentHarness.RunnerSupervisor, fn ->
        state.provider.start_turn(state.provider_handle, turn, input, provider_opts)
      end)}
   catch
@@ -1449,8 +1508,19 @@ defmodule AgentHarness.SessionServer do
         provider_turn_ref: provider_turn_ref
       })
 
-    state = if cancelling?, do: request_provider_cancel(state), else: state
-    drain_deferred_provider_messages(state)
+    state = drain_deferred_provider_messages(state)
+
+    if cancelling? and current_turn?(state, turn.id) do
+      case start_provider_cancel(state) do
+        {:ok, state} ->
+          state
+
+        {:error, reason, state} ->
+          retire_cancel_launch_failure(state, reason)
+      end
+    else
+      state
+    end
   end
 
   defp finish_turn_start(state, {:error, {:turn_start_uncertain, reason}}) do
@@ -1589,22 +1659,178 @@ defmodule AgentHarness.SessionServer do
     {:via, Registry, {AgentHarness.SessionRegistry, session.id, session}}
   end
 
-  defp respond_to_request(state, request, %Response{} = response) do
-    case state.provider.respond(state.provider_handle, request.provider_ref, response) do
-      :ok ->
-        request = %{request | status: :resolved, response: response}
+  defp start_request_response(state, request, %Response{} = response, from) do
+    if response_claimed?(state, request.id) do
+      {:reply, {:error, :response_in_progress}, state}
+    else
+      provider = state.provider
+      provider_handle = state.provider_handle
+      provider_ref = request.provider_ref
+
+      attrs = %{
+        kind: :respond,
+        turn_id: request.turn_id,
+        request_id: request.id,
+        response: response,
+        from: from
+      }
+
+      callback = fn -> provider.respond(provider_handle, provider_ref, response) end
+
+      case start_provider_command(state, attrs, callback) do
+        {:ok, state} ->
+          {:noreply, state}
+
+        {:error, reason, state} ->
+          {:reply, {:error, {:provider_command_task_failed, reason}}, state}
+      end
+    end
+  end
+
+  defp cancel_current_turn(%State{status: :cancelling} = state) do
+    {:reply, :ok, state}
+  end
+
+  defp cancel_current_turn(%State{status: :starting} = state) do
+    {:reply, :ok, mark_turn_cancelling(state)}
+  end
+
+  defp cancel_current_turn(state) do
+    case start_provider_cancel(state) do
+      {:ok, state} ->
+        {:reply, :ok, mark_turn_cancelling(state)}
+
+      {:error, reason, state} ->
+        {:reply, {:error, {:provider_command_task_failed, reason}}, state}
+    end
+  end
+
+  defp mark_turn_cancelling(state) do
+    turn = %{state.current_turn | status: :cancelling}
+
+    state = %{
+      state
+      | status: :cancelling,
+        current_turn: turn,
+        turns: Map.put(state.turns, turn.id, turn)
+    }
+
+    state = persist_turn(state, turn)
+    state = persist_session(state)
+    state = emit(state, turn.id, :cancel_requested)
+    expire_pending_requests(state, turn.id)
+  end
+
+  defp start_provider_cancel(state) do
+    if cancel_command?(state, state.current_turn.id) do
+      {:ok, state}
+    else
+      provider = state.provider
+      provider_handle = state.provider_handle
+      provider_turn_ref = state.provider_turn_ref
+
+      attrs = %{
+        kind: :cancel,
+        turn_id: state.current_turn.id,
+        request_id: nil,
+        response: nil,
+        from: nil
+      }
+
+      callback = fn -> provider.cancel(provider_handle, provider_turn_ref) end
+      start_provider_command(state, attrs, callback)
+    end
+  end
+
+  defp start_provider_command(state, attrs, callback) do
+    case start_provider_command_task(callback) do
+      {:ok, task} ->
+        started_monotonic =
+          Telemetry.start([:provider, :command], provider_command_metadata(state, attrs))
+
+        timer =
+          Process.send_after(
+            self(),
+            {:provider_command_timeout, task.ref},
+            state.config.provider_command_timeout
+          )
+
+        command =
+          struct!(
+            ProviderCommand,
+            Map.merge(attrs, %{
+              task: task,
+              timer: timer,
+              started_monotonic: started_monotonic
+            })
+          )
+
+        {:ok, %{state | provider_commands: Map.put(state.provider_commands, task.ref, command)}}
+
+      {:error, reason} ->
+        {:error, reason, state}
+    end
+  end
+
+  defp start_provider_command_task(callback) do
+    {:ok, OwnedTask.async_nolink(AgentHarness.RunnerSupervisor, callback)}
+  rescue
+    error -> {:error, {:exception, error.__struct__, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  defp finish_provider_command(state, %ProviderCommand{kind: :respond} = command, :ok) do
+    stop_provider_command_telemetry(state, command, :ok)
+    state = resolve_request_response(state, command)
+    reply_provider_command(command, :ok)
+    {:noreply, state}
+  end
+
+  defp finish_provider_command(
+         state,
+         %ProviderCommand{} = command,
+         {:error, {:provider_command_uncertain, reason}}
+       ) do
+    fail_uncertain_provider_command(state, command, reason)
+  end
+
+  defp finish_provider_command(
+         state,
+         %ProviderCommand{kind: :respond} = command,
+         {:error, reason}
+       ) do
+    stop_provider_command_telemetry(state, command, :rejected)
+    reply_provider_command(command, {:error, reason})
+    {:noreply, state}
+  end
+
+  defp finish_provider_command(state, %ProviderCommand{kind: :cancel} = command, :ok) do
+    stop_provider_command_telemetry(state, command, :ok)
+    {:noreply, state}
+  end
+
+  defp finish_provider_command(
+         state,
+         %ProviderCommand{kind: :cancel} = command,
+         {:error, reason}
+       ) do
+    stop_provider_command_telemetry(state, command, :rejected)
+    retire_failed_cancel(state, reason)
+  end
+
+  defp finish_provider_command(state, %ProviderCommand{} = command, other) do
+    reason = {:invalid_provider_command_return, other}
+    fail_uncertain_provider_command(state, command, reason)
+  end
+
+  defp resolve_request_response(state, command) do
+    case {Map.get(state.requests, command.request_id), state.current_turn} do
+      {%Request{status: :pending, turn_id: turn_id} = request, %Turn{id: turn_id}} ->
+        request = %{request | status: :resolved, response: command.response}
         requests = Map.put(state.requests, request.id, request)
-
-        pending? =
-          Enum.any?(requests, fn
-            {_id, %Request{turn_id: turn_id, status: :pending}} ->
-              turn_id == state.current_turn.id
-
-            _entry ->
-              false
-          end)
-
-        status = if pending?, do: :awaiting_input, else: :running
+        pending? = pending_requests_for_turn?(requests, turn_id)
+        status = status_after_request(state.status, pending?)
         turn = %{state.current_turn | status: status}
 
         state = %{
@@ -1618,74 +1844,142 @@ defmodule AgentHarness.SessionServer do
         state = persist_turn(state, turn)
         state = persist_request(state, request)
         state = persist_session(state)
-
-        data = %{request: request, response: response}
+        data = %{request: request, response: command.response}
         request_telemetry(:resolved, state, request)
-        {:reply, :ok, emit(state, request.turn_id, :request_resolved, data)}
+        emit(state, request.turn_id, :request_resolved, data)
 
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-    end
-  end
-
-  defp cancel_current_turn(%State{status: :cancelling} = state) do
-    {:reply, :ok, state}
-  end
-
-  defp cancel_current_turn(%State{status: :starting} = state) do
-    turn = %{state.current_turn | status: :cancelling}
-
-    state = %{
-      state
-      | status: :cancelling,
-        current_turn: turn,
-        turns: Map.put(state.turns, turn.id, turn)
-    }
-
-    state = persist_turn(state, turn)
-    state = persist_session(state)
-
-    state = emit(state, turn.id, :cancel_requested)
-    {:reply, :ok, expire_pending_requests(state, turn.id)}
-  end
-
-  defp cancel_current_turn(state) do
-    case state.provider.cancel(state.provider_handle, state.provider_turn_ref) do
-      :ok ->
-        turn = %{state.current_turn | status: :cancelling}
-
-        state = %{
-          state
-          | status: :cancelling,
-            current_turn: turn,
-            turns: Map.put(state.turns, turn.id, turn)
-        }
-
-        state = persist_turn(state, turn)
-        state = persist_session(state)
-
-        state = emit(state, state.current_turn.id, :cancel_requested)
-        {:reply, :ok, expire_pending_requests(state, state.current_turn.id)}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-    end
-  end
-
-  defp request_provider_cancel(state) do
-    case state.provider.cancel(state.provider_handle, state.provider_turn_ref) do
-      :ok ->
+      _not_active ->
         state
-
-      {:error, reason} ->
-        transport_down(state, {:cancel_failed, reason})
-
-      other ->
-        transport_down(state, {:cancel_failed, {:invalid_return, other}})
     end
+  end
+
+  defp fail_uncertain_provider_command(state, command, reason) do
+    stop_provider_command_telemetry(state, command, :uncertain)
+    reply_provider_command(command, {:error, {:provider_command_uncertain, reason}})
+
+    failure = {:provider_command_uncertain, command.kind, reason}
+    state = transport_down(state, failure)
+    safe_close_provider(state.provider, state.provider_handle)
+    {:stop, failure, clear_provider(state)}
+  end
+
+  defp retire_failed_cancel(state, reason) do
+    failure = {:provider_cancel_failed, reason}
+    state = transport_down(state, {:cancel_failed, reason})
+    safe_close_provider(state.provider, state.provider_handle)
+    {:stop, failure, clear_provider(state)}
+  end
+
+  defp retire_cancel_launch_failure(state, reason) do
+    failure = {:provider_cancel_task_failed, reason}
+    state = transport_down(state, failure)
+    safe_close_provider(state.provider, state.provider_handle)
+    {:stop, failure, clear_provider(state)}
+  end
+
+  defp response_claimed?(state, request_id) do
+    Enum.any?(state.provider_commands, fn
+      {_task_ref, %ProviderCommand{kind: :respond, request_id: ^request_id}} -> true
+      _command -> false
+    end)
+  end
+
+  defp cancel_command?(state, turn_id) do
+    Enum.any?(state.provider_commands, fn
+      {_task_ref, %ProviderCommand{kind: :cancel, turn_id: ^turn_id}} -> true
+      _command -> false
+    end)
+  end
+
+  defp pop_provider_command(state, task_ref, options \\ []) do
+    {command, provider_commands} = Map.pop!(state.provider_commands, task_ref)
+    cancel_timer(command.timer)
+
+    if Keyword.get(options, :demonitor?, false) do
+      Process.demonitor(command.task.ref, [:flush])
+    end
+
+    {command, %{state | provider_commands: provider_commands}}
+  end
+
+  defp reply_provider_command(%ProviderCommand{from: nil}, _result), do: :ok
+
+  defp reply_provider_command(%ProviderCommand{from: from}, result) do
+    GenServer.reply(from, result)
+  end
+
+  defp provider_command_metadata(state, attrs) do
+    %{
+      session_id: state.session.id,
+      provider: state.session.provider,
+      turn_id: attrs.turn_id,
+      request_id: attrs.request_id,
+      command: attrs.kind
+    }
+  end
+
+  defp stop_provider_command_telemetry(state, command, status) do
+    metadata = provider_command_metadata(state, Map.from_struct(command))
+
+    Telemetry.stop(
+      [:provider, :command],
+      command.started_monotonic,
+      Map.put(metadata, :status, status)
+    )
+  end
+
+  defp abort_provider_commands_for_turn(state, turn_id, result) do
+    abort_provider_commands(
+      state,
+      &(&1.turn_id == turn_id),
+      result
+    )
+  end
+
+  defp abort_all_provider_commands(state, result) do
+    abort_provider_commands(state, fn _command -> true end, result)
+  end
+
+  defp abort_provider_commands(state, predicate, result) do
+    Enum.reduce(state.provider_commands, state, fn {task_ref, command}, acc ->
+      if predicate.(command) do
+        cancel_timer(command.timer)
+        _ = shutdown_task_result(command.task)
+        stop_provider_command_telemetry(acc, command, :aborted)
+        reply_provider_command(command, result)
+        %{acc | provider_commands: Map.delete(acc.provider_commands, task_ref)}
+      else
+        acc
+      end
+    end)
+  end
+
+  defp stop_turn_start_task(%State{turn_start_task: nil} = state), do: state
+
+  defp stop_turn_start_task(%State{turn_start_task: task} = state) do
+    _ = shutdown_task_result(task)
+    cancel_timer(state.turn_start_timer)
+
+    %{
+      state
+      | turn_start_task: nil,
+        turn_start_timer: nil,
+        deferred_provider_messages: :queue.new()
+    }
+  end
+
+  defp interrupt_current_turn(%State{current_turn: nil} = state, _reason), do: state
+
+  defp interrupt_current_turn(state, reason) do
+    turn_id = state.current_turn.id
+
+    state
+    |> expire_pending_requests(turn_id)
+    |> complete_turn(turn_id, :interrupted, %{reason: reason}, nil)
   end
 
   defp complete_turn(state, turn_id, status, result, raw) do
+    state = abort_provider_commands_for_turn(state, turn_id, {:error, :request_expired})
     turn_started_monotonic = state.turn_started_monotonic
 
     event_type =
@@ -2020,9 +2314,12 @@ defmodule AgentHarness.SessionServer do
     end
   end
 
-  defp transport_down(%State{status: :unavailable} = state, _reason), do: state
+  defp transport_down(%State{status: :unavailable} = state, _reason) do
+    abort_all_provider_commands(state, {:error, :session_unavailable})
+  end
 
   defp transport_down(state, reason) do
+    state = abort_all_provider_commands(state, {:error, :session_unavailable})
     state = emit(state, current_turn_id(state), :transport_error, %{reason: reason})
 
     state =
@@ -2047,6 +2344,7 @@ defmodule AgentHarness.SessionServer do
   end
 
   defp close_state(state) do
+    state = abort_all_provider_commands(state, {:error, :session_stopping})
     state = %{state | status: :closed}
     state = persist_session(state)
     emit(state, nil, :session_closed)
@@ -2144,7 +2442,7 @@ defmodule AgentHarness.SessionServer do
   end
 
   defp session_snapshot(state) do
-    %{
+    snapshot = %{
       id: state.session.id,
       provider: state.session.provider,
       status: state.status,
@@ -2157,6 +2455,11 @@ defmodule AgentHarness.SessionServer do
       created_at: state.created_at,
       updated_at: DateTime.utc_now()
     }
+
+    case state.startup_attempt_id do
+      nil -> snapshot
+      attempt_id -> Map.put(snapshot, :startup, %{attempt_id: attempt_id, acknowledged: false})
+    end
   end
 
   defp notify_starter(%State{starter: {pid, ref}}, result) when is_pid(pid) do
@@ -2183,7 +2486,13 @@ defmodule AgentHarness.SessionServer do
   defp cancel_timer(timer), do: Process.cancel_timer(timer, async: true, info: false)
 
   defp shutdown_task(nil), do: :ok
-  defp shutdown_task(%Task{} = task), do: Task.shutdown(task, :brutal_kill)
+  defp shutdown_task(%Task{} = task), do: shutdown_task_result(task)
+
+  defp shutdown_task_result(%Task{} = task) do
+    Task.shutdown(task, :brutal_kill)
+  catch
+    :exit, reason -> {:exit, reason}
+  end
 
   defp maybe_persist_shutdown(reason, %State{status: status} = state)
        when reason in [:normal, :shutdown] and

@@ -1,6 +1,13 @@
 defmodule AgentHarness.SessionConfig do
   @moduledoc """
   Immutable provider configuration belonging to one logical session.
+
+  `startup_timeout` bounds Store reconciliation and provider opening;
+  `startup_finalization_timeout` separately bounds initial persistence,
+  rollback, cleanup, and readiness acknowledgement. `turn_start_timeout`
+  bounds asynchronous provider admission. `provider_command_timeout` bounds
+  response and cancellation callbacks and must be shorter than the application
+  `:provider_command_call_timeout` used by the public response call.
   """
 
   alias AgentHarness.SessionRef
@@ -24,6 +31,7 @@ defmodule AgentHarness.SessionConfig do
     startup_timeout: 30_000,
     startup_finalization_timeout: 5_000,
     turn_start_timeout: 30_000,
+    provider_command_timeout: 30_000,
     store_failure: :degrade,
     store: {AgentHarness.Store.Memory, AgentHarness.Store.Memory}
   ]
@@ -46,6 +54,7 @@ defmodule AgentHarness.SessionConfig do
           startup_timeout: pos_integer(),
           startup_finalization_timeout: pos_integer(),
           turn_start_timeout: pos_integer(),
+          provider_command_timeout: pos_integer(),
           store_failure: :degrade | :stop,
           store: false | {module(), term()}
         }
@@ -62,6 +71,7 @@ defmodule AgentHarness.SessionConfig do
     startup_finalization_timeout = Keyword.get(opts, :startup_finalization_timeout, 5_000)
 
     turn_start_timeout = Keyword.get(opts, :turn_start_timeout, 30_000)
+    provider_command_timeout = Keyword.get(opts, :provider_command_timeout, 30_000)
     store_failure = Keyword.get(opts, :store_failure, :degrade)
 
     unless is_integer(event_buffer_size) and event_buffer_size > 0 do
@@ -73,6 +83,8 @@ defmodule AgentHarness.SessionConfig do
     validate_timeout!(startup_timeout, :startup_timeout)
     validate_timeout!(startup_finalization_timeout, :startup_finalization_timeout)
     validate_timeout!(turn_start_timeout, :turn_start_timeout)
+    validate_timeout!(provider_command_timeout, :provider_command_timeout)
+    validate_provider_command_budget!(provider_command_timeout)
     validate_store_failure!(store_failure)
 
     %__MODULE__{
@@ -93,6 +105,7 @@ defmodule AgentHarness.SessionConfig do
       startup_timeout: startup_timeout,
       startup_finalization_timeout: startup_finalization_timeout,
       turn_start_timeout: turn_start_timeout,
+      provider_command_timeout: provider_command_timeout,
       store_failure: store_failure,
       store:
         Keyword.get(
@@ -107,6 +120,19 @@ defmodule AgentHarness.SessionConfig do
 
   defp validate_timeout!(timeout, name) do
     raise ArgumentError, "#{name} must be a positive integer, got: #{inspect(timeout)}"
+  end
+
+  defp validate_provider_command_budget!(timeout) do
+    outer_timeout =
+      Application.get_env(:agent_harness, :provider_command_call_timeout, 60_000)
+
+    validate_timeout!(outer_timeout, :provider_command_call_timeout)
+
+    unless timeout < outer_timeout do
+      raise ArgumentError,
+            "provider_command_timeout must be less than " <>
+              "provider_command_call_timeout (#{outer_timeout}), got: #{timeout}"
+    end
   end
 
   defp validate_completed_turn_cache_size!(:infinity), do: :ok

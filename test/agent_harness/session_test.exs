@@ -140,7 +140,6 @@ defmodule AgentHarness.SessionTest do
       {:ok, "provider-turn-2"}
     end)
 
-    expect(ProviderMock, :cancel, fn :provider_handle, "provider-turn-2" -> :ok end)
     expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
 
     {:ok, session} =
@@ -311,7 +310,7 @@ defmodule AgentHarness.SessionTest do
       |> Task.await_many()
 
     assert :ok in results
-    assert {:error, :already_resolved} in results
+    assert {:error, :response_in_progress} in results
 
     Provider.Sink.finish(sink, turn.id, :completed)
     assert_receive {:agent_harness, ^ref, %Event{type: :request_resolved}}

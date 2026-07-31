@@ -22,14 +22,18 @@ defmodule AgentHarness do
   @session_supervisor AgentHarness.SessionSupervisor
   @terminal_events [:turn_completed, :turn_failed, :turn_cancelled, :turn_interrupted]
   @default_call_timeout 30_000
+  @default_provider_command_call_timeout 60_000
 
   @doc """
   Starts a supervised logical session for `provider`.
 
   Authentication remains the responsibility of the locally installed CLI.
-  The caller waits up to the session's `:startup_timeout` for its provider to
-  become ready. Independent session handshakes are not serialized; call from a
-  supervised task when the caller itself must remain responsive.
+  Provider opening and initial Store finalization have separate bounded phases
+  (`:startup_timeout` and `:startup_finalization_timeout`). Independent session
+  handshakes are not serialized; call from a supervised task when the caller
+  itself must remain responsive. Before returning success, the caller and
+  SessionServer complete a two-way readiness acknowledgement so a queued ready
+  message cannot return a handle to a server that already died.
   """
   @spec start_session(atom(), keyword()) :: {:ok, SessionRef.t()} | {:error, term()}
   def start_session(provider, opts \\ [])
@@ -172,19 +176,34 @@ defmodule AgentHarness do
   def await(%Turn{}, opts), do: {:error, {:invalid_await_options, opts}}
 
   @doc """
-  Responds exactly once to a structured provider request.
+  Responds to a structured provider request with exactly-once local ownership.
+
+  The call waits for provider acknowledgement, while the owning SessionServer
+  remains responsive to status, cancellation, and shutdown commands. A second
+  in-flight response returns `{:error, :response_in_progress}`; a definite
+  provider rejection releases the claim. Uncertain acknowledgement returns
+  `{:error, {:provider_command_uncertain, reason}}`, fails the active turn, and
+  retires the session. The public response-call timeout must remain longer than
+  the per-session provider-command watchdog.
   """
   @spec respond(Request.t(), Response.t()) :: :ok | {:error, term()}
   def respond(%Request{session_id: session_id, id: request_id}, %Response{} = response) do
     with :ok <- Response.validate(response) do
-      call(session_id, {:respond, request_id, response})
+      call(
+        session_id,
+        {:respond, request_id, response},
+        provider_command_call_timeout()
+      )
     end
   end
 
   @doc """
   Requests cancellation.
 
-  The session remains cancelling until the provider emits a terminal event.
+  `:ok` records the intent and schedules at most one provider command; it is not
+  provider acknowledgement. The session remains cancelling until the provider
+  emits a terminal event. A later provider-command failure retires the session
+  and is observed through events and the session monitor.
   """
   @spec cancel(Turn.t()) :: :ok | {:error, term()}
   def cancel(%Turn{session_id: session_id, id: turn_id}) do
@@ -291,8 +310,9 @@ defmodule AgentHarness do
   @doc """
   Stops an idle session.
 
-  Set `force: true` to request cancellation before closing an active session.
-  A provider cancellation error leaves an established session live.
+  Set `force: true` to interrupt an active turn locally and close the session.
+  Forced shutdown does not call the provider cancellation command; it kills
+  in-flight provider tasks and retires the local provider session.
   """
   @spec stop_session(SessionRef.t(), keyword()) :: :ok | {:error, term()}
   def stop_session(session, opts \\ [])
@@ -373,14 +393,16 @@ defmodule AgentHarness do
     end
   end
 
-  defp call(session_id, message) do
+  defp call(session_id, message), do: call(session_id, message, call_timeout())
+
+  defp call(session_id, message, timeout) do
     case whereis(session_id) do
       nil ->
         {:error, :session_not_found}
 
       pid ->
         try do
-          GenServer.call(pid, message, call_timeout())
+          GenServer.call(pid, message, timeout)
         catch
           :exit, {:noproc, _details} -> {:error, :session_not_found}
           :exit, {:normal, _details} -> {:error, :session_not_found}
@@ -446,9 +468,7 @@ defmodule AgentHarness do
         await_session_finalization(pid, start_ref, session, monitor, config)
 
       {SessionServer, ^start_ref, {:ok, ^pid}} ->
-        send(pid, {SessionServer, start_ref, :starter_ack})
-        Process.demonitor(monitor, [:flush])
-        {:ok, session}
+        acknowledge_session_start(pid, start_ref, session, monitor, config)
 
       {SessionServer, ^start_ref, {:error, reason}} ->
         await_start_failure_down(monitor, pid, session.id)
@@ -475,9 +495,7 @@ defmodule AgentHarness do
   defp await_session_finalization(pid, start_ref, session, monitor, config) do
     receive do
       {SessionServer, ^start_ref, {:ok, ^pid}} ->
-        send(pid, {SessionServer, start_ref, :starter_ack})
-        Process.demonitor(monitor, [:flush])
-        {:ok, session}
+        acknowledge_session_start(pid, start_ref, session, monitor, config)
 
       {SessionServer, ^start_ref, {:error, reason}} ->
         await_start_failure_down(monitor, pid, session.id)
@@ -498,6 +516,25 @@ defmodule AgentHarness do
         if Process.alive?(pid), do: Process.exit(pid, :kill)
         await_timed_out_session_down(monitor, pid, session.id)
         {:error, :session_start_finalization_timeout}
+    end
+  end
+
+  defp acknowledge_session_start(pid, start_ref, session, monitor, config) do
+    send(pid, {SessionServer, start_ref, :starter_ack})
+
+    receive do
+      {SessionServer, ^start_ref, :starter_acknowledged} ->
+        Process.demonitor(monitor, [:flush])
+        {:ok, session}
+
+      {:DOWN, ^monitor, :process, ^pid, reason} ->
+        await_registry_release(session.id)
+        {:error, normalize_start_exit(reason)}
+    after
+      config.startup_finalization_timeout + 100 ->
+        if Process.alive?(pid), do: Process.exit(pid, :kill)
+        await_timed_out_session_down(monitor, pid, session.id)
+        {:error, :session_start_ack_timeout}
     end
   end
 
@@ -540,6 +577,14 @@ defmodule AgentHarness do
 
   defp call_timeout do
     Application.get_env(:agent_harness, :session_call_timeout, @default_call_timeout)
+  end
+
+  defp provider_command_call_timeout do
+    Application.get_env(
+      :agent_harness,
+      :provider_command_call_timeout,
+      @default_provider_command_call_timeout
+    )
   end
 
   defp store_option(opts) do

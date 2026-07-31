@@ -13,11 +13,16 @@ defmodule AgentHarness.Store do
   Events are append-only. `events/3` uses an exclusive sequence cursor, so
   `after: 7` returns events whose sequence is greater than seven. A `:turn_id`
   option asks the Store to filter by turn before applying its cursor and limit.
+
+  Public purge rejects a live SessionServer. Core-controlled startup
+  replacement and rollback may call `delete_session/2` from a task whose owner
+  is that registered SessionServer; Stores that add their own live-delete guard
+  must allow that owner-bound case.
   """
 
   alias AgentHarness.{Event, Request, Turn}
 
-  @type owner :: GenServer.server()
+  @type owner :: term()
   @type session_id :: String.t()
   @type session_snapshot :: term()
   @type event_options :: [

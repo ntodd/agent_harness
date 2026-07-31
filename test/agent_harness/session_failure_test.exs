@@ -4,6 +4,7 @@ defmodule AgentHarness.SessionFailureTest do
   import Mox
 
   alias AgentHarness.{Event, Provider, ProviderMock, Request, Response}
+  alias AgentHarness.Store.Memory
 
   setup :set_mox_global
   setup :verify_on_exit!
@@ -11,6 +12,7 @@ defmodule AgentHarness.SessionFailureTest do
   defmodule FailingStore do
     def fetch_session(_owner, _session_id), do: :not_found
     def save_session(_owner, _session_id, _snapshot), do: {:error, :disk_full}
+    def delete_session(_owner, _session_id), do: :ok
   end
 
   defmodule RaceProvider do
@@ -134,7 +136,7 @@ defmodule AgentHarness.SessionFailureTest do
                provider_options: %{scenario: :update_then_fail, test_pid: self()}
              )
 
-    assert :not_found = AgentHarness.Store.Memory.fetch_session(AgentHarness.Store.Memory, id)
+    assert :not_found = Memory.fetch_session(Memory, id)
 
     expect(ProviderMock, :open_session, fn _config, _sink ->
       {:ok, :provider_handle, %{}}
@@ -276,7 +278,11 @@ defmodule AgentHarness.SessionFailureTest do
       {:ok, "provider-turn-1"}
     end)
 
-    expect(ProviderMock, :cancel, fn :provider_handle, "provider-turn-1" -> :ok end)
+    expect(ProviderMock, :cancel, fn :provider_handle, "provider-turn-1" ->
+      send(test_pid, :provider_cancelled)
+      :ok
+    end)
+
     expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
 
     {:ok, session} = AgentHarness.start_session(:test, provider_module: ProviderMock)
@@ -286,6 +292,7 @@ defmodule AgentHarness.SessionFailureTest do
 
     assert :ok = AgentHarness.cancel(turn)
     assert :ok = AgentHarness.cancel(turn)
+    assert_receive :provider_cancelled
     assert %{status: :cancelling, current_turn: %{id: turn_id}} = AgentHarness.status(session)
     assert turn_id == turn.id
 
@@ -404,7 +411,6 @@ defmodule AgentHarness.SessionFailureTest do
       {:ok, "provider-turn-1"}
     end)
 
-    expect(ProviderMock, :cancel, fn :provider_handle, "provider-turn-1" -> :ok end)
     expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
 
     {:ok, session} = AgentHarness.start_session(:test, provider_module: ProviderMock)
@@ -606,7 +612,11 @@ defmodule AgentHarness.SessionFailureTest do
       {:ok, "provider-turn-1"}
     end)
 
-    expect(ProviderMock, :cancel, fn :provider_handle, "provider-turn-1" -> :ok end)
+    expect(ProviderMock, :cancel, fn :provider_handle, "provider-turn-1" ->
+      send(test_pid, :provider_cancelled)
+      :ok
+    end)
+
     expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
 
     {:ok, session} = AgentHarness.start_session(:test, provider_module: ProviderMock)
@@ -626,6 +636,7 @@ defmodule AgentHarness.SessionFailureTest do
                     %Event{type: :request_created, data: %Request{} = request}}
 
     assert :ok = AgentHarness.cancel(turn)
+    assert_receive :provider_cancelled
     assert_receive {:agent_harness, ^ref, %Event{type: :cancel_requested}}
     assert_receive {:agent_harness, ^ref, %Event{type: :request_expired}}
     assert {:error, :request_expired} = AgentHarness.respond(request, Response.approve())

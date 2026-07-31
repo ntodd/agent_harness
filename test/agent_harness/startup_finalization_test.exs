@@ -8,14 +8,23 @@ defmodule AgentHarness.StartupFinalizationTest do
   defmodule ProbeProvider do
     @behaviour AgentHarness.Provider
 
-    alias AgentHarness.{Capabilities, Turn}
+    alias AgentHarness.{Capabilities, Provider.Sink, Turn}
 
     @impl true
-    def open_session(config, _sink) do
+    def open_session(config, sink) do
       options = config.provider_options
+
+      if reason = Map.get(options, :transport_down_before_open),
+        do: Sink.transport_down(sink, reason)
+
       Process.sleep(Map.get(options, :open_delay, 0))
       send(options.test_pid, {:probe_provider_opened, self()})
-      {:ok, %{test_pid: options.test_pid}, %{}}
+
+      {:ok,
+       %{
+         test_pid: options.test_pid,
+         close_delay: Map.get(options, :close_delay, 0)
+       }, %{}}
     end
 
     @impl true
@@ -29,6 +38,8 @@ defmodule AgentHarness.StartupFinalizationTest do
 
     @impl true
     def close_session(handle) do
+      send(handle.test_pid, {:probe_provider_close_entered, self()})
+      Process.sleep(handle.close_delay)
       send(handle.test_pid, :probe_provider_closed)
       :ok
     end
@@ -44,6 +55,21 @@ defmodule AgentHarness.StartupFinalizationTest do
     alias AgentHarness.Store.Memory
 
     @impl true
+    def save_session(%{mode: :commit_then_hang} = owner, session_id, %{status: :idle} = snapshot) do
+      :ok = Memory.save_session(owner.memory, session_id, snapshot)
+      send(owner.test_pid, {:probe_store_idle_committed, self()})
+      Process.sleep(:infinity)
+    end
+
+    def save_session(%{mode: :commit_then_wait} = owner, session_id, %{status: :idle} = snapshot) do
+      :ok = Memory.save_session(owner.memory, session_id, snapshot)
+      send(owner.test_pid, {:probe_store_idle_committed, self()})
+
+      receive do
+        :finish_idle_commit -> :ok
+      end
+    end
+
     def save_session(owner, session_id, snapshot) do
       send(owner.test_pid, {:probe_store_save, self(), snapshot.status})
       maybe_delay(owner, :save_session)
@@ -147,6 +173,17 @@ defmodule AgentHarness.StartupFinalizationTest do
     assert {:ok, [%Event{type: :session_ready}]} = Memory.events(store, session_id)
     assert :ok = AgentHarness.stop_session(session)
     assert_receive :probe_provider_closed
+
+    assert {:ok, %{status: :closed} = snapshot} = Memory.fetch_session(store, session_id)
+    refute Map.has_key?(snapshot, :startup)
+
+    assert {:error, :session_id_already_used} =
+             AgentHarness.start_session(:probe,
+               id: session_id,
+               provider_module: ProbeProvider,
+               provider_options: %{test_pid: self()},
+               store: {Memory, store}
+             )
   end
 
   test "a hanging readiness write is rolled back and does not burn a new session id" do
@@ -181,6 +218,170 @@ defmodule AgentHarness.StartupFinalizationTest do
              )
 
     assert :ok = AgentHarness.stop_session(retry)
+    assert_receive :probe_provider_closed
+  end
+
+  test "a committed but unacknowledged startup is rolled back when its starter dies" do
+    store = start_supervised!({Memory, id: make_ref()})
+    session_id = unique_id("unacknowledged-finalization")
+    test_pid = self()
+    owner = %{memory: store, test_pid: test_pid, mode: :commit_then_hang}
+
+    starter =
+      Task.Supervisor.async_nolink(AgentHarness.RunnerSupervisor, fn ->
+        AgentHarness.start_session(:probe,
+          id: session_id,
+          provider_module: ProbeProvider,
+          provider_options: %{test_pid: test_pid},
+          startup_timeout: 100,
+          startup_finalization_timeout: 5_000,
+          store: {ProbeStore, owner}
+        )
+      end)
+
+    assert_receive {:probe_store_idle_committed, finalizer}
+    assert Process.alive?(finalizer)
+    assert {:ok, %{status: :idle}} = Memory.fetch_session(store, session_id)
+
+    server = AgentHarness.whereis(session_id)
+    server_monitor = Process.monitor(server)
+    finalizer_monitor = Process.monitor(finalizer)
+    Process.exit(starter.pid, :kill)
+
+    assert_receive {:DOWN, ^finalizer_monitor, :process, ^finalizer, :killed}
+    assert_receive {:probe_store_delete, rollback, ^server}
+    assert is_pid(rollback)
+    assert_receive {:DOWN, ^server_monitor, :process, ^server, :normal}
+    assert_receive :probe_provider_closed
+    assert :not_found = Memory.fetch_session(store, session_id)
+
+    assert {:ok, retry} =
+             AgentHarness.start_session(:probe,
+               id: session_id,
+               provider_module: ProbeProvider,
+               provider_options: %{test_pid: self()},
+               store: {Memory, store}
+             )
+
+    assert :ok = AgentHarness.stop_session(retry)
+    assert_receive :probe_provider_closed
+  end
+
+  test "a pending idle snapshot survives hard kill and is reclaimed without explicit reuse" do
+    store = start_supervised!({Memory, id: make_ref()})
+    session_id = unique_id("hard-killed-finalization")
+    test_pid = self()
+    owner = %{memory: store, test_pid: test_pid, mode: :commit_then_hang}
+
+    starter =
+      Task.Supervisor.async_nolink(AgentHarness.RunnerSupervisor, fn ->
+        AgentHarness.start_session(:probe,
+          id: session_id,
+          provider_module: ProbeProvider,
+          provider_options: %{test_pid: test_pid},
+          startup_timeout: 100,
+          startup_finalization_timeout: 5_000,
+          store: {ProbeStore, owner}
+        )
+      end)
+
+    assert_receive {:probe_store_idle_committed, finalizer}
+
+    assert {:ok, %{status: :idle, startup: %{acknowledged: false}}} =
+             Memory.fetch_session(store, session_id)
+
+    server = AgentHarness.whereis(session_id)
+    server_monitor = Process.monitor(server)
+    finalizer_monitor = Process.monitor(finalizer)
+    Process.exit(server, :kill)
+
+    assert_receive {:DOWN, ^server_monitor, :process, ^server, :killed}
+    assert_receive {:DOWN, ^finalizer_monitor, :process, ^finalizer, :killed}
+    assert {:error, :killed} = Task.await(starter, 1_000)
+
+    assert {:ok, retry} =
+             AgentHarness.start_session(:probe,
+               id: session_id,
+               provider_module: ProbeProvider,
+               provider_options: %{test_pid: self()},
+               store: {Memory, store}
+             )
+
+    assert :ok = AgentHarness.stop_session(retry)
+    assert_receive :probe_provider_closed
+  end
+
+  test "a queued ready message cannot return a dead session before startup acknowledgement" do
+    store = start_supervised!({Memory, id: make_ref()})
+    session_id = unique_id("ready-down-race")
+    test_pid = self()
+    owner = %{memory: store, test_pid: test_pid, mode: :commit_then_wait}
+
+    starter =
+      Task.Supervisor.async_nolink(AgentHarness.RunnerSupervisor, fn ->
+        AgentHarness.start_session(:probe,
+          id: session_id,
+          provider_module: ProbeProvider,
+          provider_options: %{test_pid: test_pid},
+          store: {ProbeStore, owner}
+        )
+      end)
+
+    assert_receive {:probe_store_idle_committed, finalizer}
+    true = :erlang.suspend_process(starter.pid)
+    send(finalizer, :finish_idle_commit)
+
+    server = AgentHarness.whereis(session_id)
+
+    assert %{status: :idle} =
+             eventually(fn ->
+               case AgentHarness.status(SessionRef.new(:probe, id: session_id)) do
+                 %{status: :idle} = status -> status
+                 _not_ready -> false
+               end
+             end)
+
+    assert {:ok, %{startup: %{acknowledged: false}}} = Memory.fetch_session(store, session_id)
+
+    server_monitor = Process.monitor(server)
+    Process.exit(server, :kill)
+    assert_receive {:DOWN, ^server_monitor, :process, ^server, :killed}
+    true = :erlang.resume_process(starter.pid)
+    assert {:error, :killed} = Task.await(starter, 1_000)
+
+    assert {:ok, retry} =
+             AgentHarness.start_session(:probe,
+               id: session_id,
+               provider_module: ProbeProvider,
+               provider_options: %{test_pid: self()},
+               store: {Memory, store}
+             )
+
+    assert :ok = AgentHarness.stop_session(retry)
+    assert_receive :probe_provider_closed
+  end
+
+  test "early transport failure gets the finalization budget for bounded provider cleanup" do
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:error, {:provider_open_failed, {:transport_down, :early_disconnect}}} =
+             AgentHarness.start_session(:probe,
+               provider_module: ProbeProvider,
+               provider_options: %{
+                 test_pid: self(),
+                 transport_down_before_open: :early_disconnect,
+                 close_delay: 250
+               },
+               startup_timeout: 20,
+               startup_finalization_timeout: 500,
+               store: false
+             )
+
+    elapsed = System.monotonic_time(:millisecond) - started_at
+    assert elapsed >= 240
+    assert elapsed < 750
+    assert_receive {:probe_provider_close_entered, cleanup_task}
+    assert is_pid(cleanup_task)
     assert_receive :probe_provider_closed
   end
 
@@ -272,6 +473,21 @@ defmodule AgentHarness.StartupFinalizationTest do
     assert {:ok, [%Event{type: :session_ready}]} = Memory.events(store, session_id)
     assert :ok = AgentHarness.stop_session(second)
     assert_receive :probe_provider_closed
+  end
+
+  defp eventually(fun, attempts \\ 100)
+
+  defp eventually(_fun, 0), do: flunk("condition did not become true")
+
+  defp eventually(fun, attempts) do
+    case fun.() do
+      false ->
+        Process.sleep(2)
+        eventually(fun, attempts - 1)
+
+      result ->
+        result
+    end
   end
 
   defp unique_id(prefix), do: "#{prefix}-#{System.unique_integer([:positive])}"

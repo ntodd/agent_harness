@@ -1,10 +1,11 @@
 defmodule AgentHarness.Event do
   @moduledoc """
-  A loss-preserving event emitted during an agent session.
+  A normalized event emitted during an agent session.
 
   Provider adapters normalize lifecycle events into `type` and `data`, while
-  `raw` retains the original provider payload for features that are not part of
-  the common API.
+  `raw` retains the provider value delivered to the adapter for features that
+  are not part of the common API. An upstream SDK can reject a wire message
+  before AgentHarness receives it, so this is not a byte-for-byte transport log.
   """
 
   alias AgentHarness.ID

@@ -33,7 +33,7 @@ defmodule AgentHarness.Providers.ClaudeTest do
     %{client_session: session}
   end
 
-  test "marks a turn-start call timeout as uncertain" do
+  test "marks provider call timeouts as uncertain" do
     previous_timeout =
       Application.get_env(:agent_harness, :claude_call_timeout, :not_configured)
 
@@ -53,6 +53,12 @@ defmodule AgentHarness.Providers.ClaudeTest do
 
     assert {:error, {:turn_start_uncertain, {:provider_call_failed, {:timeout, _details}}}} =
              Claude.start_turn(server, turn, "Work", [])
+
+    assert {:error, {:provider_command_uncertain, {:provider_call_failed, {:timeout, _details}}}} =
+             Claude.respond(server, :request, Response.answer("yes"))
+
+    assert {:error, {:provider_command_uncertain, {:provider_call_failed, {:timeout, _details}}}} =
+             Claude.cancel(server, :turn)
   end
 
   test "opens the global CLI with isolated MCP and plugin-backed skills", %{

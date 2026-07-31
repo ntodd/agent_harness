@@ -74,6 +74,7 @@ defmodule AgentHarness.ConcurrencyTest do
 
       case config.provider_options[:open] do
         :block ->
+          Process.flag(:trap_exit, true)
           send(test_pid, {:provider_open_entered, self()})
 
           receive do
@@ -90,6 +91,8 @@ defmodule AgentHarness.ConcurrencyTest do
       send(handle.test_pid, {:provider_turn_entered, self()})
 
       if opts[:block] do
+        Process.flag(:trap_exit, true)
+
         receive do
           :release_turn -> {:ok, turn.id}
         end

@@ -53,7 +53,6 @@ defmodule AgentHarness.StreamTest do
       {:ok, "provider-turn-1"}
     end)
 
-    expect(ProviderMock, :cancel, fn :provider_handle, "provider-turn-1" -> :ok end)
     expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
 
     {:ok, session} = AgentHarness.start_session(:test, provider_module: ProviderMock)

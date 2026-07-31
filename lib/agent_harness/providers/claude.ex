@@ -46,15 +46,20 @@ defmodule AgentHarness.Providers.Claude do
 
   @impl true
   def respond(server, provider_request_ref, %Response{} = response) do
-    Server.respond(server, provider_request_ref, response)
+    server
+    |> Server.respond(provider_request_ref, response)
+    |> normalize_provider_command_result()
   end
 
   @impl true
   def cancel(server, provider_turn_ref) do
-    Server.cancel(server, provider_turn_ref)
+    server
+    |> Server.cancel(provider_turn_ref)
+    |> normalize_provider_command_result()
   end
 
   @impl true
+  @spec close_session(pid()) :: :ok | {:error, term()}
   def close_session(server) do
     Server.close(server)
   end
@@ -73,4 +78,10 @@ defmodule AgentHarness.Providers.Claude do
       skills: :emulated
     )
   end
+
+  defp normalize_provider_command_result({:error, {:provider_call_failed, _reason} = failure}) do
+    {:error, {:provider_command_uncertain, failure}}
+  end
+
+  defp normalize_provider_command_result(result), do: result
 end

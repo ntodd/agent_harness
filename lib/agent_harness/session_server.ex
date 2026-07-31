@@ -162,6 +162,10 @@ defmodule AgentHarness.SessionServer do
     end
   end
 
+  def handle_call({:subscribe, pid, _turn_id, _cursor}, _from, state) do
+    {:reply, {:error, {:invalid_subscriber, pid}}, state}
+  end
+
   def handle_call({:unsubscribe, subscription_ref}, _from, state) do
     {:reply, :ok, remove_subscription(state, subscription_ref)}
   end
@@ -673,7 +677,7 @@ defmodule AgentHarness.SessionServer do
   end
 
   defp replay_events(%State{store: {module, owner}} = state, :start) do
-    case module.events(owner, state.session.id, []) do
+    case safe_store_events(module, owner, state.session.id, []) do
       {:ok, events} -> events
       {:error, _reason} -> EventBuffer.from(state.event_buffer, :start)
     end
@@ -681,10 +685,18 @@ defmodule AgentHarness.SessionServer do
 
   defp replay_events(%State{store: {module, owner}} = state, {:after, seq})
        when is_integer(seq) do
-    case module.events(owner, state.session.id, after: seq) do
+    case safe_store_events(module, owner, state.session.id, after: seq) do
       {:ok, events} -> events
       {:error, _reason} -> EventBuffer.from(state.event_buffer, seq + 1)
     end
+  end
+
+  defp safe_store_events(module, owner, session_id, options) do
+    module.events(owner, session_id, options)
+  rescue
+    error -> {:error, {:exception, error.__struct__, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 
   defp matches_turn?(_event, nil), do: true

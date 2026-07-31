@@ -10,6 +10,24 @@ defmodule AgentHarness.ValueObjectsTest do
     refute Map.has_key?(ref, :pid)
   end
 
+  test "session and turn handles reject unusable ids" do
+    assert_raise ArgumentError, "session id must be a non-empty string", fn ->
+      SessionRef.new(:claude, id: "")
+    end
+
+    assert_raise ArgumentError, "session id must be a non-empty string", fn ->
+      SessionRef.new(:claude, id: 42)
+    end
+
+    assert_raise ArgumentError, "session id must be a non-empty string", fn ->
+      Turn.new("", "Implement it")
+    end
+
+    assert_raise ArgumentError, "turn id must be a non-empty string", fn ->
+      Turn.new("session-1", "Implement it", id: 42)
+    end
+  end
+
   test "turns begin queued and retain caller metadata" do
     turn = Turn.new("session-1", "Implement it", metadata: %{job_id: 42})
 

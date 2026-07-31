@@ -41,6 +41,7 @@ defmodule AgentHarness.SessionFailureTest do
     assert :ok = AgentHarness.stop_session(session)
   end
 
+  @tag capture_log: true
   test "a crashing provider call returns an error instead of exiting the caller" do
     expect(ProviderMock, :open_session, fn _config, _sink ->
       {:ok, :provider_handle, %{}}

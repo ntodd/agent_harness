@@ -38,6 +38,50 @@ defmodule AgentHarness.SessionTest do
     assert {:error, :session_not_found} = AgentHarness.status(session)
   end
 
+  test "rejects malformed public options without terminating a session" do
+    expect(ProviderMock, :open_session, fn _config, _sink ->
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    assert {:error, {:invalid_session_options, [123]}} =
+             AgentHarness.start_session(:test, [123])
+
+    assert {:error, {:invalid_session_id, 123}} =
+             AgentHarness.start_session(:test,
+               id: 123,
+               provider_module: ProviderMock
+             )
+
+    {:ok, session} =
+      AgentHarness.start_session(:test, provider_module: ProviderMock)
+
+    assert {:error, {:invalid_turn_options, [123]}} =
+             AgentHarness.start_turn(session, "Invalid", [123])
+
+    assert {:error, {:invalid_turn_id, 123}} =
+             AgentHarness.start_turn(session, "Invalid", id: 123)
+
+    assert {:error, {:invalid_subscriber, :not_a_pid}} =
+             AgentHarness.subscribe(session, pid: :not_a_pid)
+
+    assert {:error, {:invalid_subscription_options, [123]}} =
+             AgentHarness.subscribe(session, [123])
+
+    server = AgentHarness.whereis(session.id)
+
+    assert {:error, {:invalid_subscriber, :not_a_pid}} =
+             GenServer.call(server, {:subscribe, :not_a_pid, nil, :latest})
+
+    assert {:error, {:invalid_force, :yes}} =
+             AgentHarness.stop_session(session, force: :yes)
+
+    assert %{status: :idle, current_turn: nil} = AgentHarness.status(session)
+    assert Process.alive?(server)
+    assert :ok = AgentHarness.stop_session(session)
+  end
+
   test "normalizes provider events and accepts another turn after authoritative completion" do
     test_pid = self()
 

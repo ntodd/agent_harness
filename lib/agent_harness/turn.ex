@@ -33,8 +33,18 @@ defmodule AgentHarness.Turn do
   @doc false
   @spec new(String.t(), term(), keyword()) :: t()
   def new(session_id, input, opts \\ []) when is_binary(session_id) and is_list(opts) do
+    id = Keyword.get_lazy(opts, :id, &ID.generate/0)
+
+    unless byte_size(session_id) > 0 do
+      raise ArgumentError, "session id must be a non-empty string"
+    end
+
+    unless is_binary(id) and byte_size(id) > 0 do
+      raise ArgumentError, "turn id must be a non-empty string"
+    end
+
     %__MODULE__{
-      id: Keyword.get_lazy(opts, :id, &ID.generate/0),
+      id: id,
       session_id: session_id,
       input: input,
       status: :queued,

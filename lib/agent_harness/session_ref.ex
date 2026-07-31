@@ -16,8 +16,14 @@ defmodule AgentHarness.SessionRef do
   @doc false
   @spec new(atom(), keyword()) :: t()
   def new(provider, opts \\ []) when is_atom(provider) and is_list(opts) do
+    id = Keyword.get_lazy(opts, :id, &ID.generate/0)
+
+    unless is_binary(id) and byte_size(id) > 0 do
+      raise ArgumentError, "session id must be a non-empty string"
+    end
+
     %__MODULE__{
-      id: Keyword.get_lazy(opts, :id, &ID.generate/0),
+      id: id,
       provider: provider
     }
   end

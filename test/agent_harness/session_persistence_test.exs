@@ -30,6 +30,27 @@ defmodule AgentHarness.SessionPersistenceTest do
     defdelegate list_requests(owner, session_id, options), to: Memory
   end
 
+  defmodule CrashingReplayStore do
+    @behaviour AgentHarness.Store
+
+    alias AgentHarness.Store.Memory
+
+    defdelegate save_session(owner, session_id, snapshot), to: Memory
+    defdelegate fetch_session(owner, session_id), to: Memory
+    defdelegate list_sessions(owner), to: Memory
+    defdelegate delete_session(owner, session_id), to: Memory
+    defdelegate save_turn(owner, turn), to: Memory
+    defdelegate fetch_turn(owner, session_id, turn_id), to: Memory
+    defdelegate list_turns(owner, session_id), to: Memory
+    defdelegate append_event(owner, event), to: Memory
+    defdelegate latest_sequence(owner, session_id), to: Memory
+    defdelegate save_request(owner, request), to: Memory
+    defdelegate fetch_request(owner, session_id, request_id), to: Memory
+    defdelegate list_requests(owner, session_id, options), to: Memory
+
+    def events(_owner, _session_id, _options), do: raise("store unavailable")
+  end
+
   test "checkpoints sessions, provider ids, turns, requests, and ordered events" do
     test_pid = self()
     store = start_supervised!({Memory, id: make_ref()})
@@ -152,6 +173,37 @@ defmodule AgentHarness.SessionPersistenceTest do
 
     assert {:ok, stream} = AgentHarness.stream(turn, from: :start, timeout: 1_000)
     assert Enum.map(stream, & &1.type) == [:turn_started, :turn_completed]
+    assert :ok = AgentHarness.stop_session(session)
+  end
+
+  test "replay falls back to the in-memory buffer when the Store raises" do
+    test_pid = self()
+    store = start_supervised!({Memory, id: make_ref()})
+
+    expect(ProviderMock, :open_session, fn _config, sink ->
+      send(test_pid, {:sink, sink})
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :start_turn, fn :provider_handle, _turn, "Fallback", [] ->
+      {:ok, "provider-turn-1"}
+    end)
+
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    {:ok, session} =
+      AgentHarness.start_session(:test,
+        provider_module: ProviderMock,
+        store: {CrashingReplayStore, store}
+      )
+
+    assert_receive {:sink, sink}
+    {:ok, turn} = AgentHarness.start_turn(session, "Fallback")
+    Provider.Sink.finish(sink, turn.id, :completed)
+
+    assert {:ok, stream} = AgentHarness.stream(turn, from: :start, timeout: 1_000)
+    assert Enum.map(stream, & &1.type) == [:turn_started, :turn_completed]
+    assert %{status: :idle} = AgentHarness.status(session)
     assert :ok = AgentHarness.stop_session(session)
   end
 

@@ -5,7 +5,10 @@ tests that consume real provider usage.
 
 ## Toolchain
 
-The repository pins Erlang, Elixir, and Node with mise:
+The repository pins Erlang, Elixir, and Node with mise. Erlang and Elixir are
+required for the library and its deterministic suite. Node is development
+parity for Node-based CLI and MCP commands; the core Elixir suite does not
+invoke Node:
 
 ```console
 $ mise install
@@ -38,12 +41,19 @@ AgentHarness.Providers.Codex.Client
 AgentHarness.Providers.Claude.Client
 ```
 
+`AgentHarness.Provider` is the public adapter contract. The two client
+behaviours are internal seams used to test the built-in adapters and are hidden
+from generated API documentation; applications should not depend on them as
+public extension points.
+
 The tests exercise:
 
 - SessionServer lifecycle and Registry behavior;
 - event ordering, replay, subscriptions, streams, and await;
 - exactly-once request responses and expiration;
 - cancellation and transport failure;
+- provider-command request claims, duplicate responses, timeout-boundary result
+  harvesting, uncertain retirement, and SessionServer responsiveness;
 - Store ownership, idempotency, and aggregate invariants;
 - Codex event normalization and response encoding;
 - Claude message normalization and `can_use_tool` decisions;
@@ -141,12 +151,19 @@ AgentHarness.await(turn, timeout: 120_000)
 AgentHarness.stop_session(session, force: true)
 ```
 
-Switch `:codex` to `:claude` to exercise Claude. For Claude subscription
-authentication, make the default explicit if desired:
+Use Claude-native options for the corresponding smoke test:
 
 ```elixir
-provider_options = %{auth: :subscription}
+{:ok, session} =
+  AgentHarness.start_session(:claude,
+    cwd: System.tmp_dir!(),
+    approval_policy: :default,
+    provider_options: %{auth: :subscription}
+  )
 ```
+
+Then run the same turn/await/stop calls. Do not carry Codex-only
+`thread_options.ephemeral` or `sandbox: :read_only` into the Claude example.
 
 If session startup fails, first run the same CLI directly in the same shell and
 working directory. Then inspect:

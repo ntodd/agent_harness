@@ -4,6 +4,7 @@ defmodule AgentHarness.MixProject do
   def project do
     [
       app: :agent_harness,
+      name: "AgentHarness",
       version: "0.1.0",
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
@@ -46,14 +47,16 @@ defmodule AgentHarness.MixProject do
     guides = [
       "docs/getting-started.md",
       "docs/configuration.md",
+      "docs/genserver-integration.md",
       "docs/lifecycle-and-events.md",
       "docs/architecture.md",
+      "docs/billing-and-authentication.md",
       "docs/testing.md"
     ]
 
     [
       main: "readme",
-      extras: ["README.md" | guides],
+      extras: ["README.md", "CHANGELOG.md" | guides],
       groups_for_extras: [Guides: guides]
     ]
   end

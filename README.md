@@ -17,23 +17,25 @@ official CLIs.
 
 - One supervised `GenServer` per logical agent session
 - Codex app-server and Claude Code streaming adapters
-- Ordered, loss-preserving `%AgentHarness.Event{}` values
+- Ordered `%AgentHarness.Event{}` values with normalized data and raw SDK payloads
 - Session- or turn-scoped subscriptions
-- Replay-safe Elixir streams and `await/2`
+- Replay-capable Elixir streams and race-free terminal `await/2`
+- Native session monitors and live/stored session inventory for orchestrators
 - Structured questions, approvals, and MCP elicitation
 - Per-session MCP servers, skills, model, workspace, sandbox, and provider options
 - An in-memory event and lifecycle store with a behaviour for durable adapters
 - Stable session and turn handles that contain IDs rather than PIDs
+- Telemetry spans and events for commands, session/turn lifetimes, requests, and Store writes
 
-AgentHarness does not pool sessions or impose a global concurrency limit. Each
-call to `start_session/2` opens a provider runtime, each session allows one
-active turn, and different sessions may run at the same time. See
+Each call to `start_session/2` opens a provider runtime, each session allows one
+active turn, and different sessions may run at the same time. Capacity can be
+bounded through supervisor configuration or caller-side admission control. See
 [Architecture and concurrency](docs/architecture.md) before creating a large
 number of resident sessions.
 
 ## Prerequisites
 
-This repository currently targets Elixir 1.19 and OTP 28.
+This repository requires Elixir 1.19 and is tested with OTP 28.
 
 Provider-side JSON helpers use Elixir 1.19's built-in `JSON` module; this
 library does not declare its own JSON codec dependency. Provider SDKs may still
@@ -49,11 +51,12 @@ $ claude --version
 $ claude
 ```
 
-By default, AgentHarness requires the CLIs' saved ChatGPT or claude.ai
-subscription login and rejects known API, cloud-provider, and custom-routing
-overrides. To intentionally use another authentication route, set
-`provider_options: %{auth: :inherit}`. Subscription usage remains subject to
-your plan's limits and terms; AgentHarness does not bypass provider billing.
+By default, AgentHarness requires the CLIs' saved ChatGPT or claude.ai login and
+rejects known API, cloud-provider, and custom-routing overrides. To
+intentionally use another authentication route, set
+`provider_options: %{auth: :inherit}`. See
+[Billing and authentication](docs/billing-and-authentication.md) for the
+provider-policy boundary and current official links.
 
 ## Installation
 
@@ -85,7 +88,7 @@ alias AgentHarness.Event
 {:ok, session} =
   AgentHarness.start_session(:codex,
     cwd: "/absolute/path/to/project",
-    approval_policy: :on_request,
+    approval_policy: :never,
     sandbox: :workspace_write
   )
 
@@ -210,8 +213,10 @@ with each turn. Details and provider-specific options are in
 
 - [Getting started and public API](docs/getting-started.md)
 - [Provider configuration, MCP, skills, and authentication](docs/configuration.md)
+- [Driving AgentHarness from a GenServer](docs/genserver-integration.md)
 - [Lifecycle, events, requests, and persistence](docs/lifecycle-and-events.md)
 - [Supervision, concurrency, and scaling](docs/architecture.md)
+- [Billing and authentication](docs/billing-and-authentication.md)
 - [Tests and live CLI checks](docs/testing.md)
 
 ## Development

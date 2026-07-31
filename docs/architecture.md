@@ -12,22 +12,26 @@ The application starts:
 AgentHarness.Supervisor (:rest_for_one)
 ├── AgentHarness.Store.Memory
 ├── AgentHarness.SessionRegistry
-├── AgentHarness.SessionSupervisor
+├── AgentHarness.RunnerSupervisor
 ├── AgentHarness.ProviderSupervisor
-└── AgentHarness.RunnerSupervisor
+└── AgentHarness.SessionSupervisor
 ```
 
 Responsibilities:
 
 - **Store.Memory** owns default ephemeral snapshots and event journals.
 - **SessionRegistry** maps stable session IDs to live SessionServer PIDs.
-- **SessionSupervisor** dynamically supervises logical SessionServers.
+- **RunnerSupervisor** owns bounded provider-open, turn-admission,
+  stream-consumer, and provider-close tasks.
 - **ProviderSupervisor** dynamically supervises provider runtime processes.
-- **RunnerSupervisor** owns temporary stream-consumer tasks.
+- **SessionSupervisor** dynamically supervises logical SessionServers.
 
 The root uses `:rest_for_one` because downstream sessions must not continue
 against a newly empty Memory Store or Registry after one of those foundational
 processes fails.
+
+The dependency order is also the shutdown order in reverse: SessionServers
+close and checkpoint before provider and task infrastructure is removed.
 
 Session and provider children are currently temporary. Supervision supplies
 ownership, isolation, shutdown, and cleanup, but v0.1 does not automatically
@@ -65,36 +69,21 @@ Provider adapters hide their concrete process model:
 - Claude uses a bidirectional CLI session plus a temporary task that consumes
   each turn's stream.
 
-Provider runtimes live under `ProviderSupervisor`; streaming tasks live under
-`RunnerSupervisor`. The logical SessionServer does not execute a blocking CLI
-read in its own callbacks.
+Provider runtimes live under `ProviderSupervisor`; temporary provider-open,
+startup-finalization/rollback, turn-admission, response/cancellation,
+stream-consumer, and bounded-close tasks live under `RunnerSupervisor`. The
+logical SessionServer does not execute a blocking CLI read in its own callbacks.
 
 Provider stream readers send normalized messages through
 `AgentHarness.Provider.Sink`. SessionServer assigns the final event sequence,
 persists the event, updates its replay buffer, and delivers it to subscribers.
 
-## Why there is no Poolboy
+## Concurrency and capacity
 
-A coding-agent session is not a fungible resource:
-
-- it owns conversation history;
-- it may have a different repository and working tree;
-- it may use different MCP servers and skills;
-- it may have pending questions or permissions;
-- it carries a provider session/thread ID;
-- a checkout could last minutes or hours.
-
-Checking such a process out of a generic worker pool would obscure the very
-identity and lifecycle AgentHarness needs to preserve.
-
-AgentHarness therefore does not use Poolboy or NimblePool. It also does not
-impose a mandatory global scheduler. The caller decides which sessions to
-create and when to start their turns.
-
-## What concurrency means
-
-Within one session, commands are serialized by a GenServer and only one turn
-may be active.
+Within one session, command admission and state transitions are serialized by a
+GenServer, and only one turn may be active. Bounded provider callbacks may
+overlap—for example, cancellation can race an in-flight response—so provider
+adapters must rely on their transport's own serialization where required.
 
 Across sessions, turns are independent:
 
@@ -112,12 +101,16 @@ sessions
 |> Enum.to_list()
 ```
 
-The `max_concurrency` above is caller policy, not an AgentHarness requirement.
-Without it, starting turns on many sessions asks all providers to run
-concurrently.
+The `max_concurrency` above is caller policy. Without it, starting turns on
+many sessions asks all providers to run concurrently.
 
-There is intentionally no hard-coded limit such as ten. The practical limit
-depends on:
+Sessions are stateful identities rather than fungible workers, so capacity is
+an admission-control concern rather than a checkout pool. Set `max_sessions`,
+`max_provider_processes`, and `max_runner_tasks` in application configuration,
+or apply a workload limit in the calling scheduler. The supervisor settings
+default to `:infinity`.
+
+Choose limits using:
 
 - provider plan and rate limits;
 - process memory and file descriptors;
@@ -128,6 +121,12 @@ depends on:
 
 Provider rate limits and resource failures surface as provider events or
 terminal failures.
+
+Session and built-in provider startup handshakes run after child initialization
+in independently supervised tasks or continuations. One slow CLI therefore
+does not hold either DynamicSupervisor's start loop. `start_session/2` still
+waits for its own provider to become ready before returning; call it from a
+startup task when the orchestrator itself must stay responsive.
 
 ## Logical sessions versus resident CLIs
 
@@ -154,10 +153,14 @@ changing public SessionRef/Turn IDs, but they are not part of v0.1.
 
 The default Memory Store is another large-fleet limit. It serializes all Store
 operations through one process and keeps full event history until an aggregate
-is deleted. Each live SessionServer also retains its turn and request maps for
-the life of that logical session. For a 1,000-session orchestrator, use a
+is deleted. A live SessionServer keeps active state plus a bounded FIFO of
+completed turns, terminal events, and requests; `completed_turn_cache_size`
+defaults to `event_buffer_size`. The bound is an object count, not a byte bound,
+and raw provider payloads can be large. For a 1,000-session orchestrator, use a
 durable/partitioned Store, expire or compact high-volume deltas, stop idle
-provider runtimes, and put admission control in the caller.
+provider runtimes, and put admission control in the caller. The built-in Memory
+Store is deliberately a development and ephemeral default, not a retention
+policy for that scale.
 
 ## Workspace concurrency
 
@@ -199,9 +202,16 @@ AgentHarness favors explicit uncertainty over false success:
 - a missing terminal record is a failure;
 - a provider runner crash fails the active turn and tears down that provider
   transport rather than risking reuse while an upstream turn may still run;
+- a turn-admission timeout, callback crash, or adapter-reported uncertain start
+  emits `:turn_failed`, closes the provider, and terminates the SessionServer;
+  subscribers see the terminal event followed by their session monitor going
+  down;
+- a definite response rejection leaves its request pending for an explicit
+  retry, while an uncertain response or cancellation retires the session;
 - transport loss makes the session unavailable;
-- Store write failure crashes the SessionServer rather than publishing an
-  unpersisted lifecycle event;
+- Store write failure follows the configured policy: `:degrade` publishes a
+  clearly non-durable `:store_failed` event and continues live-only, while
+  `:stop` terminates with a structured Store failure;
 - cancellation acceptance is not terminal completion.
 
 It does not automatically retry turns. Coding turns may already have modified
@@ -214,19 +224,19 @@ New adapters implement `AgentHarness.Provider`:
 
 ```elixir
 @callback open_session(SessionConfig.t(), Provider.Sink.t()) ::
-  {:ok, handle, session_info} | {:error, term}
+  {:ok, handle(), session_info()} | {:error, term()}
 
-@callback start_turn(handle, Turn.t(), input, keyword()) ::
-  {:ok, provider_turn_ref} | {:error, term}
+@callback start_turn(handle(), Turn.t(), term(), keyword()) ::
+  {:ok, provider_turn_ref()} | {:error, term()}
 
-@callback respond(handle, provider_request_ref, Response.t()) ::
-  :ok | {:error, term}
+@callback respond(handle(), term(), Response.t()) ::
+  :ok | {:error, term()}
 
-@callback cancel(handle, provider_turn_ref) ::
-  :ok | {:error, term}
+@callback cancel(handle(), provider_turn_ref()) ::
+  :ok | {:error, term()}
 
-@callback close_session(handle) :: :ok
-@callback capabilities(handle) :: Capabilities.t()
+@callback close_session(handle()) :: :ok | {:error, term()}
+@callback capabilities(handle()) :: Capabilities.t()
 ```
 
 Use a provider module directly:
@@ -238,6 +248,30 @@ AgentHarness.start_session(MyApp.LocalAgentProvider, cwd: "/work/project")
 The module must be loaded and implement the provider entry points. Provider
 processes should run under `AgentHarness.ProviderSupervisor`, acknowledge
 commands quickly, and emit asynchronous events through the supplied Sink.
+
+`open_session/2`, `start_turn/4`, provider commands, and `close_session/1` run
+in bounded tasks tied to the SessionServer. A provider that ties its runtime to
+the logical session must monitor `sink.pid`, not a callback task's `self()`. A
+PID handle is monitored automatically. An opaque handle can return
+`%{monitor: runtime_pid}` in `session_info`; otherwise the adapter must report
+transport loss through `AgentHarness.Provider.Sink.transport_down/2`.
+
+`capabilities/1` is the one provider callback invoked directly in a
+SessionServer call. It must be an immediate, nonblocking description of the
+already-open handle.
+
+Return an ordinary `{:error, reason}` from `start_turn/4` only when the adapter
+knows the provider rejected the turn before work began. If the callback cannot
+determine whether upstream work started, return
+`{:error, {:turn_start_uncertain, reason}}`. AgentHarness then records the
+terminal failure and retires the provider session instead of exposing it as a
+reusable idle conversation.
+
+For `respond/3`, a plain `{:error, reason}` must mean the provider definitely
+rejected the response; AgentHarness then releases the request claim. Return
+`{:error, {:provider_command_uncertain, reason}}` when acknowledgement is
+unknown. Cancellation errors are always treated conservatively because the
+upstream turn may continue running.
 
 Preserve original provider payloads in `raw`; normalize stable semantics into
 AgentHarness event and request fields.

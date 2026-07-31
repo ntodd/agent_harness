@@ -14,7 +14,14 @@ AgentHarness.start_session(provider,
   mcp_servers: %{},
   skills: [],
   env: %{},
-  provider_options: %{}
+  provider_options: %{},
+  event_buffer_size: 1_000,
+  completed_turn_cache_size: 1_000,
+  startup_timeout: 30_000,
+  startup_finalization_timeout: 5_000,
+  turn_start_timeout: 30_000,
+  provider_command_timeout: 30_000,
+  store_failure: :degrade
 )
 ```
 
@@ -23,20 +30,87 @@ adapters map the common `approval_policy` and `sandbox` fields, but each value
 must use that provider's native shape. For Claude, `approval_policy` becomes
 `permission_mode`, while `sandbox` uses the `claude_code` sandbox schema.
 
+`startup_timeout` bounds Store reconciliation and provider opening for one
+session. After the provider opens, `startup_finalization_timeout` separately
+bounds the initial Store commit and each cleanup phase; it defaults to `5_000`
+milliseconds. The public caller follows the phase transition, so one budget is
+not silently consumed by another. Readiness ends with a bounded two-way caller
+acknowledgement. Until the SessionServer processes that acknowledgement, Store
+snapshots carry a pending startup-attempt marker. A partial or hard-killed
+unacknowledged aggregate is therefore reclaimable on the next start even if its
+last write had already reached `status: :idle`. A handshake that does not finish
+within that phase budget returns `{:error, :session_start_ack_timeout}` and the
+pending attempt remains safely reclaimable.
+
+`turn_start_timeout` bounds the provider's asynchronous admission of a locally
+accepted turn. These are per-session positive millisecond values. If turn
+admission crosses its deadline, AgentHarness cannot know whether upstream work
+began, so it fails the turn and retires that SessionServer instead of reusing
+the conversation as idle.
+
+`provider_command_timeout` is the SessionServer watchdog for `respond/2` and
+the provider-facing part of `cancel/1`. It defaults to `30_000` milliseconds.
+An uncertain command timeout retires the provider session so an answer or
+cancellation that may already have crossed the transport boundary is never
+treated as safely retryable.
+
+`store_failure: :degrade` keeps a session alive after a write failure, switches
+its status snapshot to `durability: {:degraded, failure}`, and publishes a
+non-durable `:store_failed` event. Use `store_failure: :stop` when fail-stop
+durability is required.
+
+`event_buffer_size` bounds recent replay events. `completed_turn_cache_size`
+bounds completed Turn values, terminal events, and request records held by the
+live SessionServer; it defaults to the event-buffer size and may be zero or
+`:infinity`. A configured Store remains the source for older cold lookups. The
+built-in Memory Store retains its full journal until guarded purge, so use a
+durable Store with an explicit retention policy for high-volume fleets.
+
+Process-level limits and internal command deadlines are application settings:
+
+```elixir
+config :agent_harness,
+  max_sessions: 100,
+  max_provider_processes: 200,
+  max_runner_tasks: 500,
+  session_call_timeout: 30_000,
+  provider_command_call_timeout: 60_000,
+  codex_call_timeout: 25_000,
+  codex_startup_call_timeout: 25_000,
+  claude_call_timeout: 5_000,
+  claude_interrupt_timeout: 3_000,
+  claude_stop_timeout: 1_000,
+  store_call_timeout: 5_000,
+  provider_close_timeout: 5_000,
+  provider_open_shutdown_grace: 250,
+  session_shutdown_timeout: 60_000
+```
+
+The three `max_*` settings default to `:infinity`. Configure them before the
+application starts. The default provider-command deadline order is outward:
+the built-in transport call is shorter than `provider_command_timeout`, which
+must be shorter than `provider_command_call_timeout`. This lets the adapter
+report first, then the SessionServer retire uncertainty, before the public
+caller can give up. The default turn-start watchdog is likewise longer than
+either built-in provider call, and session shutdown has more time than provider
+cleanup. A built-in provider call timeout is classified as uncertain and
+retires the affected session.
+
+`provider_open_shutdown_grace` is the non-negative number of milliseconds the
+built-in opening-runtime guardian allows supervised cleanup before forcing that
+runtime down when its SessionServer disappears during startup. It defaults to
+`250`. `session_shutdown_timeout` defaults to `60_000` milliseconds so normal
+session shutdown has room for bounded provider cleanup and final persistence.
+`store_call_timeout` bounds calls to the built-in Memory Store; a custom Store
+must enforce its own I/O deadline because its callback runs in the calling
+process.
+
 ## Bring your own CLI and authentication
 
-AgentHarness always uses a local CLI. It never:
-
-- opens an authentication flow;
-- accepts a user's password;
-- stores or refreshes provider credentials;
-- shares one credential between users;
-- converts subscription use into an API service.
-
-The selected executable and any custom provider client module are trusted code
-boundaries. AgentHarness validates configuration passed to the official
-clients; it cannot prove that a replacement executable or client honors that
-configuration.
+AgentHarness launches a local CLI and relies on credentials that CLI already
+owns. It does not open login flows, accept passwords, store provider
+credentials, or choose a paid plan for you. The selected executable and any
+custom client module are trusted code boundaries.
 
 Authenticate each CLI outside your Elixir application:
 
@@ -47,36 +121,11 @@ $ claude
 
 Then verify a small request directly in the CLI before debugging AgentHarness.
 
-Your existing subscription may cover CLI usage, subject to provider plan
-limits and terms. AgentHarness defaults to a guarded `:subscription` mode.
-API keys, cloud providers, custom endpoints, and other intentional
-authentication routes require `auth: :inherit`; those routes may incur normal
-API or provider billing.
-
-For AgentHarness's intended use—your own private automation, on your own
-machine, with your own CLI login—you do not have to switch to API-key billing
-just because Elixir launches the CLI:
-
-- Codex is included in eligible ChatGPT plans, and the official guidance
-  explicitly includes the CLI and programmatic Codex control. Usage still
-  consumes the plan's shared limits or credits. See
-  [Using Codex with your ChatGPT plan](https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan).
-- Claude Code is included in paid Claude plans. Anthropic's June 15, 2026
-  change for Agent SDK and `claude -p` billing was paused; its current notice
-  says programmatic use still draws from subscription usage limits. See
-  [Use the Claude Agent SDK with your Claude plan](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
-  and [Claude pricing](https://claude.com/pricing).
-
-This is plan usage, not unlimited or unmetered access. Limits, credit rules,
-and provider policy can change, so re-check those pages before relying on
-large unattended workloads.
-
-AgentHarness is not an authentication workaround for a hosted product. In
-particular, Anthropic says developers must not offer Claude subscription login
-or route subscription credentials on behalf of other users. Use provider API
-credentials and the applicable commercial terms if you later turn an
-orchestrator into a service. See
-[Claude Code legal and compliance](https://code.claude.com/docs/en/legal-and-compliance).
+AgentHarness defaults to guarded `:subscription` mode. API keys, cloud
+providers, custom endpoints, and other intentional routes require
+`auth: :inherit`. Plan eligibility and billing are provider policy, not a
+library capability; read [Billing and authentication](billing-and-authentication.md)
+before unattended use.
 
 ### Codex authentication and environment
 

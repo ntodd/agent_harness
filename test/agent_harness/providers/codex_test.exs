@@ -57,6 +57,11 @@ defmodule AgentHarness.Providers.CodexTest do
       assert options[:process_env] == %{
                "CODEX_HOME" => "/work/codex-home",
                "CODEX_API_KEY" => "",
+               "CODEX_MODEL_PROVIDER" => "",
+               "CODEX_OLLAMA_BASE_URL" => "",
+               "CODEX_OSS_BASE_URL" => "",
+               "CODEX_OSS_PROVIDER" => "",
+               "CODEX_PROVIDER_BACKEND" => "",
                "OPENAI_API_KEY" => "",
                "OPENAI_BASE_URL" => ""
              }
@@ -90,6 +95,8 @@ defmodule AgentHarness.Providers.CodexTest do
       assert options.sandbox == :workspace_write
       assert options.web_search_enabled
       assert options.skills_enabled
+      assert options.model_provider == "openai"
+      assert options.config["model_provider"] == "openai"
 
       assert options.config["mcp_servers"] == %{
                "docs" => %{"command" => "docs-mcp", "args" => ["serve"]}

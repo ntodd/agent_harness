@@ -37,9 +37,123 @@ defmodule AgentHarness.Providers.Codex.ConfigTest do
     assert prepared.connect_options[:process_env] == %{
              "CODEX_HOME" => codex_home,
              "CODEX_API_KEY" => "",
+             "CODEX_MODEL_PROVIDER" => "",
+             "CODEX_OLLAMA_BASE_URL" => "",
+             "CODEX_OSS_BASE_URL" => "",
+             "CODEX_OSS_PROVIDER" => "",
+             "CODEX_PROVIDER_BACKEND" => "",
              "OPENAI_API_KEY" => "",
              "OPENAI_BASE_URL" => ""
            }
+  end
+
+  test "subscription auth rejects SDK model routing and config overrides" do
+    codex_home = empty_codex_home!()
+
+    for {key, value} <- [
+          model_payload: %{resolved_model: "paid", env_overrides: %{"PAID_KEY" => "present"}},
+          provider_backend: :model_provider,
+          model_provider: "paid",
+          oss_provider: "ollama",
+          external_model_overrides: %{"paid" => %{}},
+          config_overrides: [{"model_provider", "paid"}],
+          governed_authority: %{},
+          execution_surface: %{surface_kind: :remote}
+        ] do
+      config = %SessionConfig{
+        session_id: "subscription-codex-option-#{key}",
+        provider: :codex,
+        env: %{"CODEX_HOME" => codex_home},
+        provider_options: %{codex_options: Map.new([{to_string(key), value}])}
+      }
+
+      assert {:error, {:subscription_auth_conflict, {:codex_option, ^key}}} =
+               Config.prepare(config)
+    end
+  end
+
+  test "subscription auth rejects per-thread provider and raw config routing" do
+    codex_home = empty_codex_home!()
+
+    for {key, value} <- [
+          model_provider: "paid",
+          provider: "paid",
+          oss: true,
+          local_provider: "ollama",
+          profile: "paid",
+          config: %{"model_provider" => "paid"},
+          config_overrides: [{"model_provider", "paid"}],
+          allow_provider_model_fallback: true
+        ] do
+      config = %SessionConfig{
+        session_id: "subscription-thread-option-#{key}",
+        provider: :codex,
+        env: %{"CODEX_HOME" => codex_home},
+        provider_options: %{thread_options: Map.new([{to_string(key), value}])}
+      }
+
+      assert {:error, {:subscription_auth_conflict, {:thread_option, ^key}}} =
+               Config.prepare(config)
+    end
+  end
+
+  test "subscription auth rejects custom providers selected by Codex config" do
+    codex_home = empty_codex_home!()
+
+    File.write!(
+      Path.join(codex_home, "config.toml"),
+      """
+      model_provider = "paid"
+
+      [model_providers.paid]
+      name = "Paid gateway"
+      base_url = "https://paid.example"
+      env_key = "PAID_KEY"
+      wire_api = "responses"
+      """
+    )
+
+    config = %SessionConfig{
+      session_id: "subscription-config-provider",
+      provider: :codex,
+      env: %{"CODEX_HOME" => codex_home}
+    }
+
+    assert {:error, {:subscription_auth_conflict, {:codex_config, :model_provider}}} =
+             Config.prepare(config)
+  end
+
+  test "subscription auth resolves only the official backend and pins every thread" do
+    codex_home = empty_codex_home!()
+    previous_env = Application.get_env(:codex_sdk, :env, %{})
+
+    Application.put_env(
+      :codex_sdk,
+      :env,
+      Map.merge(previous_env, %{
+        "CODEX_PROVIDER_BACKEND" => "oss",
+        "CODEX_OSS_PROVIDER" => "ollama",
+        "CODEX_OLLAMA_BASE_URL" => "https://paid.example"
+      })
+    )
+
+    on_exit(fn -> Application.put_env(:codex_sdk, :env, previous_env) end)
+
+    config = %SessionConfig{
+      session_id: "subscription-resolved-options",
+      provider: :codex,
+      env: %{"CODEX_HOME" => codex_home}
+    }
+
+    assert {:ok, prepared} = Config.prepare(config)
+    assert {:ok, options} = prepared.client.options(prepared.codex_options)
+    assert :ok = Config.validate_resolved_options(prepared, options)
+    assert options.model_payload.provider_backend == :openai
+    assert options.model_payload.env_overrides == %{}
+
+    thread_options = Config.thread_options(prepared, config, self())
+    assert thread_options.model_provider == "openai"
+    assert thread_options.config["model_provider"] == "openai"
   end
 
   test "inherit auth preserves SDK options and child environment" do

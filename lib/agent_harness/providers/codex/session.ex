@@ -80,6 +80,7 @@ defmodule AgentHarness.Providers.Codex.Session do
 
     with {:ok, prepared} <- Config.prepare(config),
          {:ok, codex_options} <- prepared.client.options(prepared.codex_options),
+         :ok <- Config.validate_resolved_options(prepared, codex_options),
          {:ok, connection} <-
            prepared.client.connect(codex_options, prepared.connect_options) do
       {:ok,

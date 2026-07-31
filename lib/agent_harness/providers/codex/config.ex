@@ -5,6 +5,50 @@ defmodule AgentHarness.Providers.Codex.Config do
   alias AgentHarness.SessionConfig
   alias Codex.Auth.Store
   alias Codex.Config.BaseURL
+  alias Codex.Config.LayerStack
+
+  @subscription_codex_option_defaults [
+    api_key: nil,
+    base_url: nil,
+    openai_base_url: nil,
+    openaiBaseUrl: nil,
+    model_payload: nil,
+    provider_backend: nil,
+    model_provider: nil,
+    oss_provider: nil,
+    ollama_base_url: nil,
+    anthropic_base_url: nil,
+    anthropic_auth_token: nil,
+    external_model_overrides: nil,
+    config: [],
+    config_overrides: [],
+    governed_authority: nil,
+    execution_surface: nil
+  ]
+
+  @subscription_thread_option_defaults [
+    model_provider: nil,
+    provider: nil,
+    oss: false,
+    local_provider: nil,
+    profile: nil,
+    config_profile: nil,
+    config: %{},
+    config_override: [],
+    config_overrides: [],
+    allow_provider_model_fallback: nil
+  ]
+
+  @subscription_process_env ~w(
+    CODEX_API_KEY
+    CODEX_MODEL_PROVIDER
+    CODEX_OLLAMA_BASE_URL
+    CODEX_OSS_BASE_URL
+    CODEX_OSS_PROVIDER
+    CODEX_PROVIDER_BACKEND
+    OPENAI_API_KEY
+    OPENAI_BASE_URL
+  )
 
   @connect_key_aliases %{
     "init_timeout_ms" => :init_timeout_ms,
@@ -87,6 +131,7 @@ defmodule AgentHarness.Providers.Codex.Config do
            options
            |> fetch(:thread_options, %{})
            |> normalize_map(:thread_options, @thread_key_aliases),
+         :ok <- validate_subscription_thread_options(auth, thread_options),
          {:ok, turn_options} <-
            options
            |> fetch(:turn_options, %{})
@@ -138,8 +183,62 @@ defmodule AgentHarness.Providers.Codex.Config do
       |> Map.merge(prepared.thread_options)
       |> put_mcp_servers(config.mcp_servers)
       |> maybe_enable_skills(prepared.skills)
+      |> enforce_thread_auth(prepared.auth)
 
     Map.put(options, :transport, {:app_server, connection})
+  end
+
+  @spec validate_resolved_options(prepared(), term()) :: :ok | {:error, term()}
+  def validate_resolved_options(
+        %{auth: :subscription, client: Client.SDK},
+        %Codex.Options{} = options
+      ) do
+    with :ok <- validate_resolved_core_options(options) do
+      validate_resolved_model_payload(options.model_payload)
+    end
+  end
+
+  def validate_resolved_options(%{auth: :subscription, client: Client.SDK}, other),
+    do: {:error, {:subscription_auth_conflict, {:unexpected_resolved_options, other}}}
+
+  def validate_resolved_options(_prepared, _options), do: :ok
+
+  defp validate_resolved_core_options(options) do
+    cond do
+      options.api_key not in [nil, false] ->
+        resolved_auth_conflict(:api_key)
+
+      options.base_url != BaseURL.default() ->
+        resolved_auth_conflict(:base_url)
+
+      options.config_overrides != [] ->
+        resolved_auth_conflict(:config_overrides)
+
+      not is_nil(options.governed_authority) ->
+        resolved_auth_conflict(:governed_authority)
+
+      options.execution_surface != %CliSubprocessCore.ExecutionSurface{} ->
+        resolved_auth_conflict(:execution_surface)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_resolved_model_payload(payload) do
+    cond do
+      payload_value(payload, :provider_backend) not in [:openai, "openai"] ->
+        resolved_auth_conflict(:provider_backend)
+
+      payload_value(payload, :env_overrides, %{}) != %{} ->
+        resolved_auth_conflict(:model_environment)
+
+      payload_config_values(payload) != [] ->
+        resolved_auth_conflict(:model_config)
+
+      true ->
+        :ok
+    end
   end
 
   @spec turn_options(prepared(), String.t(), keyword() | map()) :: map()
@@ -273,10 +372,19 @@ defmodule AgentHarness.Providers.Codex.Config do
   defp validate_subscription_options(:inherit, _codex_options), do: :ok
 
   defp validate_subscription_options(:subscription, codex_options) do
-    if Map.has_key?(codex_options, :api_key) or Map.has_key?(codex_options, "api_key") do
-      {:error, {:subscription_auth_conflict, :provider_api_key}}
-    else
-      :ok
+    case conflicting_option(codex_options, @subscription_codex_option_defaults) do
+      :api_key -> {:error, {:subscription_auth_conflict, :provider_api_key}}
+      nil -> :ok
+      key -> {:error, {:subscription_auth_conflict, {:codex_option, key}}}
+    end
+  end
+
+  defp validate_subscription_thread_options(:inherit, _thread_options), do: :ok
+
+  defp validate_subscription_thread_options(:subscription, thread_options) do
+    case conflicting_option(thread_options, @subscription_thread_option_defaults) do
+      nil -> :ok
+      key -> {:error, {:subscription_auth_conflict, {:thread_option, key}}}
     end
   end
 
@@ -285,17 +393,19 @@ defmodule AgentHarness.Providers.Codex.Config do
   defp validate_subscription_profile(:subscription, config, connect_options) do
     {codex_home, explicit?} = effective_codex_home(connect_options)
     cwd = Keyword.get(connect_options, :cwd, config.cwd)
-    mode = Store.credentials_store_mode(codex_home, cwd)
 
-    cond do
-      mode == :keyring ->
-        {:error, {:subscription_auth_conflict, {:uninspectable_credentials_store, mode}}}
+    with {:ok, layers} <- LayerStack.load(codex_home, cwd),
+         effective_config = LayerStack.effective_config(layers),
+         :ok <- validate_subscription_config(effective_config),
+         :ok <- validate_credentials_store(effective_config),
+         :ok <- validate_file_auth_profile(codex_home, explicit?) do
+      :ok
+    else
+      {:error, {:subscription_auth_conflict, _reason}} = error ->
+        error
 
-      mode == :auto and Store.keyring_supported?() ->
-        {:error, {:subscription_auth_conflict, {:uninspectable_credentials_store, mode}}}
-
-      true ->
-        validate_file_auth_profile(codex_home, explicit?)
+      {:error, reason} ->
+        {:error, {:subscription_auth_check_failed, reason}}
     end
   end
 
@@ -303,6 +413,12 @@ defmodule AgentHarness.Providers.Codex.Config do
     case Store.load(codex_home: codex_home, codex_home_explicit?: explicit?) do
       {:ok, %Store.Record{auth_mode: mode}} when mode in [:api_key, :bedrock_api_key] ->
         {:error, {:subscription_auth_conflict, {:stored_auth_mode, mode}}}
+
+      {:ok, %Store.Record{openai_api_key: api_key}} when is_binary(api_key) ->
+        {:error, {:subscription_auth_conflict, :stored_api_key}}
+
+      {:ok, %Store.Record{bedrock_api_key: credentials}} when not is_nil(credentials) ->
+        {:error, {:subscription_auth_conflict, :stored_bedrock_credentials}}
 
       {:ok, _record_or_nil} ->
         :ok
@@ -344,22 +460,140 @@ defmodule AgentHarness.Providers.Codex.Config do
     ])
     |> Map.put(:api_key, false)
     |> Map.put(:base_url, BaseURL.default())
+    |> Map.put(:provider_backend, :openai)
+    |> Map.put(:config_overrides, [])
   end
 
   defp enforce_process_auth(connect_options, :inherit), do: connect_options
 
   defp enforce_process_auth(connect_options, :subscription) do
+    {codex_home, _explicit?} = effective_codex_home(connect_options)
+
     process_env =
       connect_options
       |> Keyword.get(:process_env, Keyword.get(connect_options, :env, %{}))
       |> Map.new(fn {key, value} -> {to_string(key), value} end)
-      |> Map.put("CODEX_API_KEY", "")
-      |> Map.put("OPENAI_API_KEY", "")
-      |> Map.put("OPENAI_BASE_URL", "")
+      |> then(fn env ->
+        Enum.reduce(@subscription_process_env, env, &Map.put(&2, &1, ""))
+      end)
+      |> Map.put("CODEX_HOME", codex_home)
 
     connect_options
     |> Keyword.delete(:env)
     |> Keyword.put(:process_env, process_env)
+  end
+
+  defp enforce_thread_auth(options, :inherit), do: options
+
+  defp enforce_thread_auth(options, :subscription) do
+    config =
+      options
+      |> Map.get(:config, %{})
+      |> Kernel.||(%{})
+      |> Map.delete(:model_provider)
+      |> Map.put("model_provider", "openai")
+
+    options
+    |> Map.put(:model_provider, "openai")
+    |> Map.put(:config, config)
+  end
+
+  defp validate_credentials_store(config) do
+    mode =
+      case config_value(config, :cli_auth_credentials_store) do
+        "keyring" -> :keyring
+        "auto" -> :auto
+        _ -> :file
+      end
+
+    cond do
+      mode == :keyring ->
+        {:error, {:subscription_auth_conflict, {:uninspectable_credentials_store, mode}}}
+
+      mode == :auto and Store.keyring_supported?() ->
+        {:error, {:subscription_auth_conflict, {:uninspectable_credentials_store, mode}}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_subscription_config(config) do
+    cond do
+      config_value(config, :model_provider) not in [nil, "openai"] ->
+        subscription_config_conflict(:model_provider)
+
+      config_value(config, :openai_base_url) not in [nil, BaseURL.default()] ->
+        subscription_config_conflict(:openai_base_url)
+
+      present_collection?(config_value(config, :model_providers)) ->
+        subscription_config_conflict(:model_providers)
+
+      present_collection?(config_value(config, :profiles)) ->
+        subscription_config_conflict(:profiles)
+
+      config_value(config, :profile) not in [nil, ""] ->
+        subscription_config_conflict(:profile)
+
+      config_value(config, :forced_login_method) not in [nil, "chatgpt"] ->
+        subscription_config_conflict(:forced_login_method)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp subscription_config_conflict(key),
+    do: {:error, {:subscription_auth_conflict, {:codex_config, key}}}
+
+  defp resolved_auth_conflict(key),
+    do: {:error, {:subscription_auth_conflict, {:resolved_codex_option, key}}}
+
+  defp conflicting_option(options, defaults) do
+    Enum.find_value(defaults, fn {key, safe_value} ->
+      case fetch_option(options, key) do
+        :missing -> nil
+        {:ok, ^safe_value} -> nil
+        {:ok, _value} -> key
+      end
+    end)
+  end
+
+  defp fetch_option(options, key) do
+    case Map.fetch(options, key) do
+      {:ok, value} ->
+        {:ok, value}
+
+      :error ->
+        case Map.fetch(options, Atom.to_string(key)) do
+          {:ok, value} -> {:ok, value}
+          :error -> :missing
+        end
+    end
+  end
+
+  defp config_value(config, key) do
+    Map.get(config, Atom.to_string(key), Map.get(config, key))
+  end
+
+  defp present_collection?(nil), do: false
+  defp present_collection?(value) when value in [%{}, []], do: false
+  defp present_collection?(_value), do: true
+
+  defp payload_value(payload, key, default \\ nil)
+
+  defp payload_value(payload, key, default) when is_map(payload) do
+    Map.get(payload, key, Map.get(payload, Atom.to_string(key), default))
+  end
+
+  defp payload_value(_payload, _key, default), do: default
+
+  defp payload_config_values(payload) do
+    payload
+    |> payload_value(:backend_metadata, %{})
+    |> payload_value(:config_values, [])
+    |> List.wrap()
+    |> Enum.reject(&(&1 in [nil, ""]))
   end
 
   defp normalize_skills(skills) when is_list(skills) do

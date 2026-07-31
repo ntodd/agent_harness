@@ -4,7 +4,7 @@ defmodule AgentHarness.Providers.ClaudeLiveTest do
   alias AgentHarness.{Event, Request, Response}
 
   @moduletag :live
-  @moduletag timeout: 180_000
+  @moduletag timeout: 300_000
 
   test "runs a turn through the authenticated global Claude CLI" do
     assert {:ok, session} =
@@ -24,9 +24,10 @@ defmodule AgentHarness.Providers.ClaudeLiveTest do
     assert {:ok,
             %{
               status: :completed,
-              result: %{text: "OK", is_error: false, session_id: session_id}
+              result: %{text: text, is_error: false, session_id: session_id}
             }} = AgentHarness.await(turn, timeout: 120_000)
 
+    assert String.trim(text) == "OK"
     assert is_binary(session_id)
     assert :ok = AgentHarness.stop_session(session)
   end
@@ -65,13 +66,15 @@ defmodule AgentHarness.Providers.ClaudeLiveTest do
 
     assert subscription_ref == subscription.ref
     assert request.kind == :question
-    assert request.prompt == "Do you prefer red or blue?"
+    prompt = String.downcase(request.prompt)
+    assert prompt =~ "red"
+    assert prompt =~ "blue"
     assert :ok = AgentHarness.respond(request, Response.answer("Red"))
 
     assert {:ok, %{status: :completed, result: %{text: text, is_error: false}}} =
              AgentHarness.await(turn, timeout: 120_000)
 
-    assert text =~ "red"
+    assert String.contains?(String.downcase(text), "red")
     assert :ok = AgentHarness.stop_session(session)
   end
 

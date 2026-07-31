@@ -46,6 +46,7 @@ defmodule AgentHarness.SessionServer do
       :turn_started_monotonic,
       :turn_start_task,
       :turn_start_timer,
+      :session_started_monotonic,
       :created_at,
       :config_fingerprint,
       :store,
@@ -76,7 +77,7 @@ defmodule AgentHarness.SessionServer do
 
   def start_link(opts) do
     session = Keyword.fetch!(opts, :session)
-    GenServer.start_link(__MODULE__, opts, name: via(session.id))
+    GenServer.start_link(__MODULE__, opts, name: via(session))
   end
 
   @impl true
@@ -189,6 +190,22 @@ defmodule AgentHarness.SessionServer do
 
       is_binary(turn_id) and not Map.has_key?(state.turns, turn_id) ->
         {:reply, {:error, :turn_not_found}, state}
+
+      true ->
+        subscribe(state, pid, turn_id, from)
+    end
+  end
+
+  def handle_call({:subscribe_stream, pid, turn_id, from}, _from, state) when is_pid(pid) do
+    cond do
+      not valid_replay_cursor?(from) ->
+        {:reply, {:error, {:invalid_replay_cursor, from}}, state}
+
+      not Map.has_key?(state.turns, turn_id) ->
+        {:reply, {:error, :turn_not_found}, state}
+
+      from == :latest and Map.has_key?(state.terminal_events, turn_id) ->
+        {:reply, {:error, :replay_unavailable}, state}
 
       true ->
         subscribe(state, pid, turn_id, from)
@@ -312,7 +329,11 @@ defmodule AgentHarness.SessionServer do
     Process.demonitor(task.ref, [:flush])
     cancel_timer(state.turn_start_timer)
     state = %{state | turn_start_task: nil, turn_start_timer: nil}
-    {:noreply, finish_turn_start(state, result)}
+
+    case finish_turn_start(state, result) do
+      {:stop, reason, state} -> {:stop, reason, state}
+      state -> {:noreply, state}
+    end
   end
 
   def handle_info(
@@ -339,9 +360,11 @@ defmodule AgentHarness.SessionServer do
         deferred_provider_messages: :queue.new()
     }
 
-    state = fail_turn_start(state, :provider_turn_start_timeout)
-    safe_close_provider(state.provider, state.provider_handle)
-    {:stop, :provider_turn_start_timeout, state}
+    retire_uncertain_turn_start(
+      state,
+      :provider_turn_start_timeout,
+      :provider_turn_start_timeout
+    )
   end
 
   def handle_info({:provider_turn_start_timeout, _stale_ref}, state), do: {:noreply, state}
@@ -452,7 +475,8 @@ defmodule AgentHarness.SessionServer do
         deferred_provider_messages: :queue.new()
     }
 
-    {:noreply, fail_turn_start(state, {:provider_turn_start_task_down, reason})}
+    failure = {:provider_turn_start_task_down, reason}
+    retire_uncertain_turn_start(state, failure, {:provider_turn_start_uncertain, failure})
   end
 
   def handle_info(
@@ -499,7 +523,8 @@ defmodule AgentHarness.SessionServer do
       safe_close_provider(state.provider, state.provider_handle)
     end
 
-    maybe_persist_shutdown(reason, state)
+    state = maybe_persist_shutdown(reason, state)
+    stop_session_telemetry(state, reason)
     :ok
   end
 
@@ -548,7 +573,13 @@ defmodule AgentHarness.SessionServer do
           provider_session_id: state.provider_session_id
         })
 
-      {:ok, state}
+      started_at =
+        Telemetry.start([:session], %{
+          session_id: state.session.id,
+          provider: state.session.provider
+        })
+
+      {:ok, %{state | session_started_monotonic: started_at}}
     rescue
       error ->
         safe_close_provider(state.provider, provider_handle)
@@ -778,6 +809,14 @@ defmodule AgentHarness.SessionServer do
     drain_deferred_provider_messages(state)
   end
 
+  defp finish_turn_start(state, {:error, {:turn_start_uncertain, reason}}) do
+    retire_uncertain_turn_start(
+      state,
+      reason,
+      {:provider_turn_start_uncertain, reason}
+    )
+  end
+
   defp finish_turn_start(state, {:error, reason}), do: fail_turn_start(state, reason)
 
   defp finish_turn_start(state, other) do
@@ -790,6 +829,13 @@ defmodule AgentHarness.SessionServer do
     turn_id = state.current_turn.id
     state = %{state | deferred_provider_messages: :queue.new()}
     complete_turn(state, turn_id, :failed, %{reason: reason}, nil)
+  end
+
+  defp retire_uncertain_turn_start(state, failure, stop_reason) do
+    state = fail_turn_start(state, failure)
+    state = state |> Map.put(:status, :unavailable) |> persist_session()
+    safe_close_provider(state.provider, state.provider_handle)
+    {:stop, stop_reason, clear_provider(state)}
   end
 
   defp turn_starting?(%State{turn_start_task: %Task{}}), do: true
@@ -898,8 +944,8 @@ defmodule AgentHarness.SessionServer do
     end
   end
 
-  defp via(session_id) do
-    {:via, Registry, {AgentHarness.SessionRegistry, session_id}}
+  defp via(session) do
+    {:via, Registry, {AgentHarness.SessionRegistry, session.id, session}}
   end
 
   defp respond_to_request(state, request, %Response{} = response) do
@@ -1408,15 +1454,29 @@ defmodule AgentHarness.SessionServer do
 
   defp maybe_persist_shutdown(reason, %State{status: status} = state)
        when reason in [:normal, :shutdown] and status not in [:opening, :closed] do
-    _ = close_state(state)
-    :ok
+    close_state(state)
   rescue
-    _error -> :ok
+    _error -> state
   catch
-    _kind, _reason -> :ok
+    _kind, _reason -> state
   end
 
-  defp maybe_persist_shutdown(_reason, _state), do: :ok
+  defp maybe_persist_shutdown(_reason, state), do: state
+
+  defp stop_session_telemetry(
+         %State{session_started_monotonic: started_at} = state,
+         reason
+       )
+       when is_integer(started_at) do
+    Telemetry.stop([:session], started_at, %{
+      session_id: state.session.id,
+      provider: state.session.provider,
+      status: state.status,
+      reason: reason
+    })
+  end
+
+  defp stop_session_telemetry(_state, _reason), do: :ok
 
   defp config_fingerprint(config) do
     config

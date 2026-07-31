@@ -33,6 +33,28 @@ defmodule AgentHarness.Providers.ClaudeTest do
     %{client_session: session}
   end
 
+  test "marks a turn-start call timeout as uncertain" do
+    previous_timeout =
+      Application.get_env(:agent_harness, :claude_call_timeout, :not_configured)
+
+    Application.put_env(:agent_harness, :claude_call_timeout, 10)
+    server = spawn(fn -> Process.sleep(:infinity) end)
+
+    on_exit(fn ->
+      Process.exit(server, :kill)
+
+      case previous_timeout do
+        :not_configured -> Application.delete_env(:agent_harness, :claude_call_timeout)
+        timeout -> Application.put_env(:agent_harness, :claude_call_timeout, timeout)
+      end
+    end)
+
+    turn = Turn.new("session-1", "Work", id: "uncertain-turn")
+
+    assert {:error, {:turn_start_uncertain, {:provider_call_failed, {:timeout, _details}}}} =
+             Claude.start_turn(server, turn, "Work", [])
+  end
+
   test "opens the global CLI with isolated MCP and plugin-backed skills", %{
     client_session: client_session
   } do
@@ -90,6 +112,37 @@ defmodule AgentHarness.Providers.ClaudeTest do
     expect(ClientMock, :stop, fn ^client_session -> :ok end)
 
     assert {:error, _reason} = Claude.open_session(config(), Sink.new(self()))
+  end
+
+  test "uses the session startup budget while waiting for Claude readiness", %{
+    client_session: client_session
+  } do
+    previous_timeout =
+      Application.get_env(:agent_harness, :claude_call_timeout, :not_configured)
+
+    Application.put_env(:agent_harness, :claude_call_timeout, 5)
+
+    on_exit(fn ->
+      case previous_timeout do
+        :not_configured -> Application.delete_env(:agent_harness, :claude_call_timeout)
+        timeout -> Application.put_env(:agent_harness, :claude_call_timeout, timeout)
+      end
+    end)
+
+    expect(ClientMock, :start_link, fn _opts -> {:ok, client_session} end)
+
+    expect(ClientMock, :await_ready, fn ^client_session, _timeout ->
+      Process.sleep(25)
+      :ok
+    end)
+
+    expect(ClientMock, :session_id, fn ^client_session -> "ready-session" end)
+    stub(ClientMock, :stop, fn ^client_session -> :ok end)
+
+    assert {:ok, handle, %{provider_session_id: "ready-session"}} =
+             Claude.open_session(config(startup_timeout: 100), Sink.new(self()))
+
+    assert :ok = Claude.close_session(handle)
   end
 
   test "consumes Claude messages in a runner and finishes on ResultMessage", %{

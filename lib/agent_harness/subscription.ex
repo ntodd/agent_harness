@@ -1,6 +1,10 @@
 defmodule AgentHarness.Subscription do
   @moduledoc """
-  Handle for a monitored event subscription.
+  Handle for an event subscription.
+
+  The SessionServer monitors the subscriber so it can remove dead consumers.
+  That direction does not notify the consumer if the session dies; use
+  `AgentHarness.monitor/1` for that lifecycle signal.
   """
 
   @enforce_keys [:ref, :session_id, :pid, :server]

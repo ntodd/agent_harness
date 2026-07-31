@@ -103,27 +103,38 @@ defmodule AgentHarness.SessionFailureTest do
   end
 
   @tag capture_log: true
-  test "a crashing provider admission fails the turn without exiting the session" do
+  test "a crashing provider admission fails the turn and retires the uncertain session" do
+    test_pid = self()
+
     expect(ProviderMock, :open_session, fn _config, _sink ->
       {:ok, :provider_handle, %{}}
     end)
 
     expect(ProviderMock, :start_turn, fn :provider_handle, _turn, "Crash", [] ->
-      raise "provider callback crashed"
+      send(test_pid, {:provider_start_entered, self()})
+
+      receive do
+        :raise -> raise "provider callback crashed"
+      end
     end)
 
     expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
 
     {:ok, session} = AgentHarness.start_session(:test, provider_module: ProviderMock)
+    {:ok, monitor} = AgentHarness.monitor(session)
 
     assert {:ok, turn} = AgentHarness.start_turn(session, "Crash")
+    assert {:ok, subscription} = AgentHarness.subscribe(turn, from: :start)
+    assert_receive {:provider_start_entered, provider_task}
+    send(provider_task, :raise)
 
-    assert {:error, %Event{type: :turn_failed, data: %{result: %{reason: reason}}}} =
-             AgentHarness.await(turn, timeout: 1_000)
+    assert_receive {:agent_harness, subscription_ref,
+                    %Event{type: :turn_failed, data: %{result: %{reason: reason}}}}
 
+    assert subscription_ref == subscription.ref
     assert match?({:provider_turn_start_task_down, _reason}, reason)
-    assert %{status: :idle} = AgentHarness.status(session)
-    assert :ok = AgentHarness.stop_session(session)
+    assert_receive {:DOWN, ^monitor, :process, _server, {:provider_turn_start_uncertain, ^reason}}
+    assert {:error, :session_not_found} = AgentHarness.status(session)
   end
 
   test "cancellation remains pending until the provider emits a terminal event" do

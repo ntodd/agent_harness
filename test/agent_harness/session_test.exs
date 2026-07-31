@@ -38,6 +38,30 @@ defmodule AgentHarness.SessionTest do
     assert {:error, :session_not_found} = AgentHarness.status(session)
   end
 
+  test "live session inventory does not call a busy SessionServer" do
+    expect(ProviderMock, :open_session, fn _config, _sink ->
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    assert {:ok, session} =
+             AgentHarness.start_session(:test, provider_module: ProviderMock)
+
+    server = AgentHarness.whereis(session.id)
+    :ok = :sys.suspend(server)
+
+    try do
+      started_at = System.monotonic_time(:millisecond)
+      assert session in AgentHarness.list_sessions()
+      assert System.monotonic_time(:millisecond) - started_at < 100
+    after
+      :ok = :sys.resume(server)
+    end
+
+    assert :ok = AgentHarness.stop_session(session)
+  end
+
   test "rejects malformed public options without terminating a session" do
     expect(ProviderMock, :open_session, fn _config, _sink ->
       {:ok, :provider_handle, %{}}

@@ -2,9 +2,21 @@ defmodule AgentHarness.Provider do
   @moduledoc """
   Behaviour implemented by coding-agent provider adapters.
 
-  Provider callbacks acknowledge commands quickly. Long-running I/O belongs in
-  provider-owned processes which publish normalized messages through
+  `open_session/2` runs in a bounded startup task. Other provider callbacks
+  acknowledge commands quickly. Long-running I/O belongs in provider-owned
+  processes which publish normalized messages through
   `AgentHarness.Provider.Sink`.
+
+  A PID handle is monitored automatically. For an opaque handle, return a
+  runtime PID as `session_info.monitor`; otherwise the adapter must report
+  transport loss with `AgentHarness.Provider.Sink.transport_down/2`. A runtime
+  tied to the logical session should monitor `sink.pid`, not the temporary
+  process executing `open_session/2`.
+
+  If `start_turn/4` cannot determine whether upstream work began, return
+  `{:error, {:turn_start_uncertain, reason}}`. AgentHarness records a terminal
+  failure and retires that provider session so potentially running work cannot
+  be mistaken for a reusable idle conversation.
   """
 
   alias AgentHarness.{Capabilities, Response, SessionConfig, Turn}
@@ -14,6 +26,7 @@ defmodule AgentHarness.Provider do
   @type provider_turn_ref :: term()
   @type session_info :: %{
           optional(:provider_session_id) => String.t() | nil,
+          optional(:monitor) => pid(),
           optional(atom()) => term()
         }
 

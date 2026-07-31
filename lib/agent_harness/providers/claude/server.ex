@@ -66,8 +66,8 @@ defmodule AgentHarness.Providers.Claude.Server do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
-  def provider_session_id(server) do
-    case call(server, :provider_session_id) do
+  def provider_session_id(server, startup_timeout) do
+    case call(server, :provider_session_id, startup_timeout) do
       {:error, reason} -> {:error, reason}
       provider_session_id -> {:ok, provider_session_id}
     end
@@ -1030,7 +1030,11 @@ defmodule AgentHarness.Providers.Claude.Server do
   end
 
   defp call(server, message) do
-    GenServer.call(server, message, call_timeout())
+    call(server, message, call_timeout())
+  end
+
+  defp call(server, message, timeout) do
+    GenServer.call(server, message, timeout)
   catch
     :exit, reason -> {:error, {:provider_call_failed, reason}}
   end

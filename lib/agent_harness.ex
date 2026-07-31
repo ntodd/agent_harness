@@ -27,12 +27,17 @@ defmodule AgentHarness do
   Starts a supervised logical session for `provider`.
 
   Authentication remains the responsibility of the locally installed CLI.
+  The caller waits up to the session's `:startup_timeout` for its provider to
+  become ready. Independent session handshakes are not serialized; call from a
+  supervised task when the caller itself must remain responsive.
   """
   @spec start_session(atom(), keyword()) :: {:ok, SessionRef.t()} | {:error, term()}
   def start_session(provider, opts \\ [])
 
   def start_session(provider, opts) when is_atom(provider) and is_list(opts) do
-    Telemetry.span([:session], %{provider: provider}, fn -> do_start_session(provider, opts) end)
+    Telemetry.span([:command, :start_session], %{provider: provider}, fn ->
+      do_start_session(provider, opts)
+    end)
   end
 
   def start_session(provider, _opts) when not is_atom(provider),
@@ -41,7 +46,11 @@ defmodule AgentHarness do
   def start_session(_provider, opts), do: {:error, {:invalid_session_options, opts}}
 
   @doc """
-  Starts one turn. A session rejects a second concurrent turn.
+  Accepts one turn locally and starts provider admission asynchronously.
+
+  The returned turn initially has status `:starting`. A session rejects a
+  second concurrent turn. If the local SessionServer call times out, the error
+  includes the stable turn handle for reconciliation.
   """
   @spec start_turn(SessionRef.t(), term(), keyword()) :: {:ok, Turn.t()} | {:error, term()}
   def start_turn(session, input, opts \\ [])
@@ -92,10 +101,13 @@ defmodule AgentHarness do
   end
 
   @doc """
-  Returns a replay-safe stream for a turn.
+  Returns a replay-followed-by-live stream for a turn.
 
   The stream must be consumed by the process that calls this function. It ends
-  after the provider's terminal turn event.
+  after a terminal turn event included by the replay cursor or delivered live.
+  The per-event timeout defaults to `:infinity`; pass a finite `:timeout` for
+  bounded callers. A completed turn with no terminal event in the requested
+  replay returns `{:error, :replay_unavailable}`.
   """
   @spec stream(Turn.t(), keyword()) :: {:ok, Enumerable.t()} | {:error, term()}
   def stream(turn, opts \\ [])
@@ -104,8 +116,10 @@ defmodule AgentHarness do
     with :ok <- validate_keyword_options(opts, :stream),
          timeout = Keyword.get(opts, :timeout, :infinity),
          :ok <- validate_timeout(timeout, :stream),
-         subscription_opts = Keyword.take(opts, [:from]) |> Keyword.put_new(:from, :start),
-         {:ok, subscription} <- subscribe(turn, subscription_opts) do
+         from = Keyword.get(opts, :from, :start),
+         true <- valid_replay_cursor?(from) or {:error, {:invalid_replay_cursor, from}},
+         {:ok, subscription} <-
+           call(turn.session_id, {:subscribe_stream, self(), turn.id, from}) do
       stream =
         Stream.resource(
           fn -> {:open, subscription, Process.monitor(subscription.server)} end,
@@ -121,6 +135,10 @@ defmodule AgentHarness do
 
   @doc """
   Waits for a turn's terminal event without a completion-subscription race.
+
+  The event-wait timeout defaults to `:infinity`. Do not call this blocking
+  function from a GenServer callback; subscribe and monitor the session
+  instead.
   """
   @spec await(Turn.t(), keyword()) :: {:ok, term()} | {:error, term()}
   def await(turn, opts \\ [])
@@ -176,7 +194,7 @@ defmodule AgentHarness do
   @doc """
   Returns the live session snapshot.
   """
-  @spec status(SessionRef.t()) :: map() | {:error, :session_not_found}
+  @spec status(SessionRef.t()) :: map() | {:error, term()}
   def status(%SessionRef{id: session_id}), do: call(session_id, :status)
 
   @doc """
@@ -206,13 +224,14 @@ defmodule AgentHarness do
   def list_sessions do
     AgentHarness.SessionRegistry
     |> Registry.select([
-      {{:"$1", :"$2", :"$3"}, [], [{{:"$2", :"$1"}}]}
+      {{:"$1", :"$2", :"$3"}, [], [{{:"$2", :"$3"}}]}
     ])
-    |> Enum.flat_map(fn {pid, _session_id} ->
-      case safe_status(pid) do
-        %{session: %SessionRef{} = session} -> [session]
-        _other -> []
-      end
+    |> Enum.flat_map(fn
+      {pid, %SessionRef{} = session} ->
+        if Process.alive?(pid), do: [session], else: []
+
+      {_pid, _value} ->
+        []
     end)
     |> Enum.sort_by(& &1.id)
   end
@@ -239,7 +258,10 @@ defmodule AgentHarness do
   end
 
   @doc """
-  Cascades deletion of a non-live session aggregate from its configured Store.
+  Cascades deletion of a non-live session aggregate from a Store.
+
+  The Store defaults to the built-in Memory instance. Pass `:store` again for
+  a custom Store because a PID-free stopped handle does not retain its owner.
   """
   @spec purge_session(SessionRef.t() | String.t(), keyword()) :: :ok | {:error, term()}
   def purge_session(session_or_id, opts \\ []) when is_list(opts) do
@@ -266,6 +288,7 @@ defmodule AgentHarness do
   Stops an idle session.
 
   Set `force: true` to request cancellation before closing an active session.
+  A provider cancellation error leaves an established session live.
   """
   @spec stop_session(SessionRef.t(), keyword()) :: :ok | {:error, term()}
   def stop_session(session, opts \\ [])
@@ -467,12 +490,6 @@ defmodule AgentHarness do
 
   defp call_timeout do
     Application.get_env(:agent_harness, :session_call_timeout, @default_call_timeout)
-  end
-
-  defp safe_status(pid) do
-    GenServer.call(pid, :status, 1_000)
-  catch
-    :exit, _reason -> nil
   end
 
   defp store_option(opts) do

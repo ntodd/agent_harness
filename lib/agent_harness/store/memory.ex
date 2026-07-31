@@ -110,7 +110,9 @@ defmodule AgentHarness.Store.Memory do
   @doc """
   Reads events in ascending sequence order.
 
-  `:after` is exclusive. `:limit` defaults to `:infinity`.
+  `:after` is exclusive. `:limit` defaults to `:infinity`. Passing `:turn_id`
+  selects that turn through the Store's per-turn index before applying the
+  cursor and limit.
   """
   @impl AgentHarness.Store
   @spec events(GenServer.server(), String.t(), keyword()) ::

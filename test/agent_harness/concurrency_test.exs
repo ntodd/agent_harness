@@ -53,7 +53,13 @@ defmodule AgentHarness.ConcurrencyTest do
     def cancel(_handle, _provider_ref), do: :ok
 
     @impl true
-    def close_session(_handle), do: :ok
+    def close_session(handle) do
+      if test_pid = handle.config.provider_options[:close_test_pid] do
+        send(test_pid, :blocking_provider_closed)
+      end
+
+      :ok
+    end
 
     @impl true
     def capabilities(_handle), do: Capabilities.new(cancel: :native)
@@ -228,6 +234,34 @@ defmodule AgentHarness.ConcurrencyTest do
 
     send(provider_caller, {:release_turn, turn.id})
     assert :ok = AgentHarness.stop_session(session, force: true)
+  end
+
+  @tag capture_log: true
+  test "a provider admission timeout fails the turn and retires the uncertain session" do
+    assert {:ok, session} =
+             AgentHarness.start_session(:blocking,
+               provider_module: BlockingTurnProvider,
+               provider_options: %{close_test_pid: self()},
+               turn_start_timeout: 100
+             )
+
+    {:ok, monitor} = AgentHarness.monitor(session)
+    assert {:ok, turn} = AgentHarness.start_turn(session, "work", test_pid: self())
+    assert {:ok, subscription} = AgentHarness.subscribe(turn, from: :start)
+    assert_receive {:provider_start_entered, turn_id, _provider_caller, _open_caller}
+    assert turn_id == turn.id
+
+    assert_receive {:agent_harness, subscription_ref,
+                    %AgentHarness.Event{
+                      type: :turn_failed,
+                      data: %{result: %{reason: :provider_turn_start_timeout}}
+                    }},
+                   500
+
+    assert subscription_ref == subscription.ref
+    assert_receive {:DOWN, ^monitor, :process, _server, :provider_turn_start_timeout}, 500
+    assert_receive :blocking_provider_closed
+    refute_receive :blocking_provider_closed, 50
   end
 
   defp assert_provider_runtime_opens_in_parallel(provider, provider_options) do

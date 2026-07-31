@@ -19,6 +19,26 @@ defmodule AgentHarness.Providers.CodexTest do
     %{session: session, sink: sink}
   end
 
+  test "marks a turn-start call timeout as uncertain", %{session: session} do
+    previous_timeout = Application.get_env(:agent_harness, :codex_call_timeout, :not_configured)
+    Application.put_env(:agent_harness, :codex_call_timeout, 10)
+    runtime = spawn(fn -> Process.sleep(:infinity) end)
+
+    on_exit(fn ->
+      Process.exit(runtime, :kill)
+
+      case previous_timeout do
+        :not_configured -> Application.delete_env(:agent_harness, :codex_call_timeout)
+        timeout -> Application.put_env(:agent_harness, :codex_call_timeout, timeout)
+      end
+    end)
+
+    turn = Turn.new(session.id, "Work", id: "uncertain-turn")
+
+    assert {:error, {:turn_start_uncertain, :provider_call_timeout}} =
+             CodexProvider.start_turn(runtime, turn, "Work", [])
+  end
+
   test "opens an isolated app-server and maps per-session configuration", %{
     session: session,
     sink: sink

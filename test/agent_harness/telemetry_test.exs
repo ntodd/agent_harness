@@ -13,6 +13,8 @@ defmodule AgentHarness.TelemetryTest do
     handler_id = {__MODULE__, make_ref()}
 
     events = [
+      [:agent_harness, :command, :start_session, :start],
+      [:agent_harness, :command, :start_session, :stop],
       [:agent_harness, :session, :start],
       [:agent_harness, :session, :stop],
       [:agent_harness, :turn, :start],
@@ -38,18 +40,31 @@ defmodule AgentHarness.TelemetryTest do
 
     {:ok, session} = AgentHarness.start_session(:test, provider_module: ProviderMock)
     assert_receive {:sink, sink}
+
+    assert_receive {:telemetry, [:agent_harness, :command, :start_session, :start], _,
+                    %{provider: :test}}
+
+    assert_receive {:telemetry, [:agent_harness, :command, :start_session, :stop], %{duration: _},
+                    _}
+
+    assert_receive {:telemetry, [:agent_harness, :session, :start], _,
+                    %{provider: :test, session_id: session_id}}
+
+    assert session_id == session.id
+    refute_receive {:telemetry, [:agent_harness, :session, :stop], _, _}, 20
+
     {:ok, turn} = AgentHarness.start_turn(session, "secret prompt")
     Provider.Sink.finish(sink, turn.id, :completed)
     assert {:ok, %{status: :completed}} = AgentHarness.await(turn, timeout: 1_000)
     assert :ok = AgentHarness.stop_session(session)
 
-    assert_receive {:telemetry, [:agent_harness, :session, :start], _, %{provider: :test}}
-    assert_receive {:telemetry, [:agent_harness, :session, :stop], %{duration: _}, _}
+    assert_receive {:telemetry, [:agent_harness, :session, :stop], %{duration: _},
+                    %{session_id: ^session_id, reason: :normal}}
 
     assert_receive {:telemetry, [:agent_harness, :turn, :start], _,
-                    %{session_id: session_id, turn_id: turn_id}}
+                    %{session_id: turn_session_id, turn_id: turn_id}}
 
-    assert session_id == session.id
+    assert turn_session_id == session.id
     assert turn_id == turn.id
 
     assert_receive {:telemetry, [:agent_harness, :turn, :stop], %{duration: _},

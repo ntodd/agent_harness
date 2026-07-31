@@ -38,6 +38,9 @@ defmodule AgentHarness.StreamTest do
              :turn_completed
            ]
 
+    assert {:error, :replay_unavailable} =
+             AgentHarness.stream(turn, from: :latest, timeout: 10)
+
     assert :ok = AgentHarness.stop_session(session)
   end
 

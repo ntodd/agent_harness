@@ -11,7 +11,8 @@ defmodule AgentHarness.Store do
   durable adapter to restore the public and provider identifiers it needs.
 
   Events are append-only. `events/3` uses an exclusive sequence cursor, so
-  `after: 7` returns events whose sequence is greater than seven.
+  `after: 7` returns events whose sequence is greater than seven. A `:turn_id`
+  option asks the Store to filter by turn before applying its cursor and limit.
   """
 
   alias AgentHarness.{Event, Request, Turn}

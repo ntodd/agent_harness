@@ -35,7 +35,16 @@ defmodule AgentHarness.Providers.Codex do
 
   @impl true
   def start_turn(session, %Turn{} = turn, input, options) do
-    call(session, {:start_turn, turn, input, options})
+    case call(session, {:start_turn, turn, input, options}) do
+      {:error, :provider_call_timeout} ->
+        {:error, {:turn_start_uncertain, :provider_call_timeout}}
+
+      {:error, {:provider_call_failed, _reason} = failure} ->
+        {:error, {:turn_start_uncertain, failure}}
+
+      result ->
+        result
+    end
   end
 
   @impl true

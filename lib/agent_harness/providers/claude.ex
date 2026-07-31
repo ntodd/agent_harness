@@ -19,7 +19,7 @@ defmodule AgentHarness.Providers.Claude do
            {Server, config: config, sink: sink}
          ) do
       {:ok, server} ->
-        case Server.provider_session_id(server) do
+        case Server.provider_session_id(server, config.startup_timeout) do
           {:ok, provider_session_id} ->
             {:ok, server, %{provider_session_id: provider_session_id}}
 
@@ -35,7 +35,13 @@ defmodule AgentHarness.Providers.Claude do
 
   @impl true
   def start_turn(server, %Turn{} = turn, input, opts) do
-    Server.start_turn(server, turn, input, opts)
+    case Server.start_turn(server, turn, input, opts) do
+      {:error, {:provider_call_failed, _reason} = failure} ->
+        {:error, {:turn_start_uncertain, failure}}
+
+      result ->
+        result
+    end
   end
 
   @impl true

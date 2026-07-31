@@ -15,23 +15,44 @@ response, and subscriber delivery passes through one session mailbox.
 A session opens asynchronously and `start_session/2` returns only after it is
 ready:
 
-```text
-opening → provider ready → finalizing Store/cleanup → idle
+```mermaid
+stateDiagram-v2
+  state "opening" as Opening
+  state "finalizing Store/cleanup" as Finalizing
+  state "idle" as Idle
+
+  [*] --> Opening
+  Opening --> Finalizing: provider ready
+  Finalizing --> Idle: Store finalization complete
+
+  note right of Idle
+    The two-way readiness acknowledgement completes
+    before start_session/2 returns.
+  end note
 ```
 
 The ordinary turn lifecycle is:
 
-```text
-idle
-  │ start_turn accepted locally
-  ▼
-starting ── provider accepted ──► running ── request created ──► awaiting_input
-  │                                  ▲                               │
-  └── cancel intent ──► cancelling   └──── last request resolved ────┘
-  ▲                               │
-  ├── cancel accepted ──► cancelling
-  │
-  └── provider terminal event ──► idle
+```mermaid
+stateDiagram-v2
+  state "idle" as Idle
+  state "starting" as Starting
+  state "running" as Running
+  state "awaiting_input" as AwaitingInput
+  state "cancelling" as Cancelling
+
+  [*] --> Idle
+  Idle --> Starting: start_turn accepted locally
+  Starting --> Running: provider accepted
+  Starting --> Cancelling: cancel intent
+  Running --> AwaitingInput: request created
+  AwaitingInput --> Running: last request resolved
+  Running --> Cancelling: cancel requested
+  AwaitingInput --> Cancelling: cancel requested
+  Starting --> Idle: authoritative terminal event
+  Running --> Idle: authoritative terminal event
+  AwaitingInput --> Idle: authoritative terminal event
+  Cancelling --> Idle: authoritative terminal event
 ```
 
 The public turn handle is returned in `:starting` state before provider I/O

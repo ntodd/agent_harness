@@ -64,10 +64,47 @@ defmodule AgentHarness.MixProject do
       main: "readme",
       extras: ["README.md", "CHANGELOG.md", "LICENSE" | guides],
       groups_for_extras: [Guides: guides, Project: ["CHANGELOG.md", "LICENSE"]],
+      before_closing_body_tag: &mermaid_renderer/1,
       source_ref: "v#{@version}",
       source_url: @source_url
     ]
   end
+
+  defp mermaid_renderer(:html) do
+    """
+    <script defer src="https://cdn.jsdelivr.net/npm/mermaid@11.16.0/dist/mermaid.min.js"></script>
+    <script>
+      let mermaidInitialized = false;
+
+      window.addEventListener("exdoc:loaded", () => {
+        if (!mermaidInitialized) {
+          mermaid.initialize({
+            startOnLoad: false,
+            theme: document.body.className.includes("dark") ? "dark" : "default"
+          });
+          mermaidInitialized = true;
+        }
+
+        let mermaidId = 0;
+        for (const codeEl of document.querySelectorAll("pre code.mermaid")) {
+          const preEl = codeEl.parentElement;
+          const graphDefinition = codeEl.textContent;
+          const graphEl = document.createElement("div");
+          const graphId = "mermaid-graph-" + mermaidId++;
+
+          mermaid.render(graphId, graphDefinition).then(({svg, bindFunctions}) => {
+            graphEl.innerHTML = svg;
+            bindFunctions?.(graphEl);
+            preEl.insertAdjacentElement("afterend", graphEl);
+            preEl.remove();
+          });
+        }
+      });
+    </script>
+    """
+  end
+
+  defp mermaid_renderer(:epub), do: ""
 
   defp package do
     [

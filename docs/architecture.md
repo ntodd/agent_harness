@@ -8,13 +8,20 @@ stateful agent sessions are interchangeable pooled workers.
 
 The application starts:
 
-```text
-AgentHarness.Supervisor (:rest_for_one)
-├── AgentHarness.Store.Memory
-├── AgentHarness.SessionRegistry
-├── AgentHarness.RunnerSupervisor
-├── AgentHarness.ProviderSupervisor
-└── AgentHarness.SessionSupervisor
+```mermaid
+flowchart TD
+  Root["AgentHarness.Supervisor<br/>:rest_for_one"]
+  Store["1. AgentHarness.Store.Memory"]
+  Registry["2. AgentHarness.SessionRegistry"]
+  Runner["3. AgentHarness.RunnerSupervisor"]
+  Provider["4. AgentHarness.ProviderSupervisor"]
+  Session["5. AgentHarness.SessionSupervisor"]
+
+  Root --> Store
+  Root --> Registry
+  Root --> Runner
+  Root --> Provider
+  Root --> Session
 ```
 
 Responsibilities:
@@ -52,8 +59,9 @@ restart and rehydrate a crashed coding session.
 The public `%AgentHarness.SessionRef{}` contains no PID. Calls resolve it through
 the Registry:
 
-```text
-SessionRef ID → Registry → SessionServer
+```mermaid
+flowchart LR
+  SessionRef["SessionRef ID"] --> Registry --> SessionServer
 ```
 
 Provider adapters receive an authenticated sink containing the SessionServer

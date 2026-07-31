@@ -97,7 +97,7 @@ defmodule AgentHarness.Providers.Codex.NormalizerTest do
            ]
   end
 
-  test "does not offer session approval when the provider did not advertise it" do
+  test "offers the session scope supported by file and permission approval protocols" do
     file = %Events.FileApprovalRequested{
       id: 12,
       thread_id: "thread",
@@ -109,6 +109,7 @@ defmodule AgentHarness.Providers.Codex.NormalizerTest do
 
     assert attrs[:choices] == [
              %{label: "Approve once", value: :approve},
+             %{label: "Approve for session", value: :approve_for_session},
              %{label: "Deny", value: :deny},
              %{label: "Cancel", value: :cancel}
            ]

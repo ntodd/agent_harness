@@ -273,6 +273,7 @@ defmodule AgentHarness.Providers.Codex.Normalizer do
   defp approval_choices(nil) do
     [
       %{label: "Approve once", value: :approve},
+      %{label: "Approve for session", value: :approve_for_session},
       %{label: "Deny", value: :deny},
       %{label: "Cancel", value: :cancel}
     ]

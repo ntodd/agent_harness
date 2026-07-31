@@ -26,6 +26,15 @@ defmodule AgentHarness.Provider.Sink do
     deliver(sink, {:request, turn_id, provider_ref, attrs, raw})
   end
 
+  @doc """
+  Expires a pending request that the provider resolved or withdrew itself.
+  """
+  @spec expire_request(t(), String.t(), term(), term(), term()) :: :ok
+  def expire_request(%__MODULE__{} = sink, turn_id, provider_ref, reason, raw \\ nil)
+      when is_binary(turn_id) do
+    deliver(sink, {:expire_request, turn_id, provider_ref, reason, raw})
+  end
+
   @spec finish(t(), String.t(), :completed | :failed | :cancelled | :interrupted, term(), term()) ::
           :ok
   def finish(%__MODULE__{} = sink, turn_id, status, result \\ %{}, raw \\ nil)

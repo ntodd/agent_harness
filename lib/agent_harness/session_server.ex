@@ -299,6 +299,18 @@ defmodule AgentHarness.SessionServer do
   end
 
   def handle_info(
+        {:agent_harness_provider, sink_ref,
+         {:expire_request, turn_id, provider_ref, reason, raw}},
+        %State{sink: %Sink{ref: sink_ref}} = state
+      ) do
+    if current_turn?(state, turn_id) do
+      {:noreply, expire_provider_request(state, turn_id, provider_ref, reason, raw)}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info(
         {:agent_harness_provider, sink_ref, {:finish, turn_id, status, result, raw}},
         %State{sink: %Sink{ref: sink_ref}} = state
       ) do
@@ -470,6 +482,63 @@ defmodule AgentHarness.SessionServer do
       emit(acc, turn_id, :request_expired, request)
     end)
   end
+
+  defp expire_provider_request(state, turn_id, provider_ref, reason, raw) do
+    request =
+      Enum.find_value(state.requests, fn
+        {_id,
+         %Request{
+           turn_id: ^turn_id,
+           provider_ref: ^provider_ref,
+           status: :pending
+         } = request} ->
+          request
+
+        _entry ->
+          nil
+      end)
+
+    case request do
+      nil ->
+        state
+
+      request ->
+        request = %{
+          request
+          | status: :expired,
+            metadata: Map.put(request.metadata, :expiration_reason, reason)
+        }
+
+        requests = Map.put(state.requests, request.id, request)
+        pending? = pending_requests_for_turn?(requests, turn_id)
+        status = status_after_request(state.status, pending?)
+        turn = %{state.current_turn | status: status}
+
+        state = %{
+          state
+          | requests: requests,
+            status: status,
+            current_turn: turn,
+            turns: Map.put(state.turns, turn.id, turn)
+        }
+
+        :ok = persist_turn(state, turn)
+        :ok = persist_request(state, request)
+        :ok = persist_session(state)
+        emit(state, turn_id, :request_expired, request, raw)
+    end
+  end
+
+  defp pending_requests_for_turn?(requests, turn_id) do
+    Enum.any?(requests, fn
+      {_id, %Request{turn_id: ^turn_id, status: :pending}} -> true
+      _entry -> false
+    end)
+  end
+
+  defp status_after_request(:cancelling, _pending?), do: :cancelling
+  defp status_after_request(_status, true), do: :awaiting_input
+  defp status_after_request(_status, false), do: :running
 
   defp emit(state, turn_id, type, data \\ %{}, raw \\ nil) do
     seq = state.seq + 1

@@ -3,7 +3,7 @@ defmodule AgentHarness.SessionFailureTest do
 
   import Mox
 
-  alias AgentHarness.{Event, Provider, ProviderMock}
+  alias AgentHarness.{Event, Provider, ProviderMock, Request, Response}
 
   setup :set_mox_global
   setup :verify_on_exit!
@@ -106,6 +106,64 @@ defmodule AgentHarness.SessionFailureTest do
     assert_receive {:agent_harness, ^ref, %Event{type: :turn_failed, seq: terminal_seq}}
     assert expired_seq < terminal_seq
 
+    assert :ok = AgentHarness.stop_session(session)
+  end
+
+  test "provider-side request resolution expires the matching pending request" do
+    test_pid = self()
+
+    expect(ProviderMock, :open_session, fn _config, sink ->
+      send(test_pid, {:sink, sink})
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :start_turn, fn :provider_handle, _turn, "Review", [] ->
+      {:ok, "provider-turn-1"}
+    end)
+
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    {:ok, session} = AgentHarness.start_session(:test, provider_module: ProviderMock)
+    assert_receive {:sink, sink}
+    {:ok, subscription} = AgentHarness.subscribe(session, from: :latest)
+    {:ok, turn} = AgentHarness.start_turn(session, "Review")
+
+    Provider.Sink.request(sink, turn.id, "approval-1",
+      kind: :permission,
+      prompt: "Allow this?"
+    )
+
+    assert_receive {:agent_harness, ref, %Event{type: :turn_started}}
+    assert ref == subscription.ref
+
+    assert_receive {:agent_harness, ^ref,
+                    %Event{type: :request_created, data: %Request{} = request}}
+
+    raw = %{"type" => "server_request_resolved", "request_id" => "approval-1"}
+
+    Provider.Sink.expire_request(
+      sink,
+      turn.id,
+      "approval-1",
+      :provider_resolved,
+      raw
+    )
+
+    assert_receive {:agent_harness, ^ref,
+                    %Event{
+                      type: :request_expired,
+                      data: %Request{id: request_id, status: :expired},
+                      raw: ^raw
+                    }}
+
+    assert request_id == request.id
+    assert %{status: :running, pending_requests: []} = AgentHarness.status(session)
+
+    assert {:error, :request_expired} =
+             AgentHarness.respond(request, Response.approve())
+
+    Provider.Sink.finish(sink, turn.id, :completed)
+    assert_receive {:agent_harness, ^ref, %Event{type: :turn_completed}}
     assert :ok = AgentHarness.stop_session(session)
   end
 

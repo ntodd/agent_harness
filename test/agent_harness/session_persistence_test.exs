@@ -386,6 +386,64 @@ defmodule AgentHarness.SessionPersistenceTest do
     assert List.last(events).type == :session_closed
   end
 
+  test "shutdown interrupts an active turn and expires its pending requests" do
+    store = start_supervised!({Memory, id: make_ref()})
+    test_pid = self()
+
+    expect(ProviderMock, :open_session, fn _config, sink ->
+      send(test_pid, {:sink, sink})
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :start_turn, fn :provider_handle, _turn, "Wait", [] ->
+      {:ok, "provider-turn"}
+    end)
+
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    {:ok, session} =
+      AgentHarness.start_session(:test,
+        provider_module: ProviderMock,
+        store: {Memory, store}
+      )
+
+    assert_receive {:sink, sink}
+    {:ok, turn} = AgentHarness.start_turn(session, "Wait")
+
+    Provider.Sink.request(sink, turn.id, :question,
+      kind: :question,
+      prompt: "Continue?"
+    )
+
+    assert {:ok, [%Request{status: :pending}]} =
+             eventually(fn ->
+               case Memory.list_requests(store, session.id, status: :pending) do
+                 {:ok, [_request]} = result -> result
+                 _other -> false
+               end
+             end)
+
+    server = AgentHarness.whereis(session.id)
+    monitor = Process.monitor(server)
+    Process.exit(server, :shutdown)
+    assert_receive {:DOWN, ^monitor, :process, ^server, :shutdown}
+
+    assert {:ok, %{status: :closed, current_turn_id: nil}} =
+             Memory.fetch_session(store, session.id)
+
+    assert {:ok, %{status: :interrupted, result: %{reason: :session_shutdown}}} =
+             Memory.fetch_turn(store, session.id, turn.id)
+
+    assert {:ok, [%Request{status: :expired}]} = Memory.list_requests(store, session.id)
+    assert {:ok, events} = Memory.events(store, session.id)
+
+    assert Enum.take(Enum.map(events, & &1.type), -3) == [
+             :request_expired,
+             :turn_interrupted,
+             :session_closed
+           ]
+  end
+
   @tag capture_log: true
   test "inventory exposes stale snapshots for explicit replacement" do
     store = start_supervised!({Memory, id: make_ref()})

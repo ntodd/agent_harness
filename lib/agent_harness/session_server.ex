@@ -39,8 +39,10 @@ defmodule AgentHarness.SessionServer do
       :provider_session_id,
       :sink,
       :starter,
+      :starter_monitor,
       :open_task,
       :open_timer,
+      :open_failure,
       :current_turn,
       :provider_turn_ref,
       :turn_started_monotonic,
@@ -70,7 +72,7 @@ defmodule AgentHarness.SessionServer do
       id: {__MODULE__, session.id},
       start: {__MODULE__, :start_link, [opts]},
       restart: :temporary,
-      shutdown: Application.get_env(:agent_harness, :session_shutdown_timeout, 10_000),
+      shutdown: Application.get_env(:agent_harness, :session_shutdown_timeout, 20_000),
       type: :worker
     }
   end
@@ -90,12 +92,15 @@ defmodule AgentHarness.SessionServer do
     sink = Sink.new(self())
     created_at = DateTime.utc_now()
 
+    starter = Keyword.fetch!(opts, :starter)
+
     state = %State{
       session: session,
       config: config,
       provider: provider,
       sink: sink,
-      starter: Keyword.fetch!(opts, :starter),
+      starter: starter,
+      starter_monitor: starter |> elem(0) |> Process.monitor(),
       event_buffer: EventBuffer.new(config.event_buffer_size),
       store: config.store,
       durability: if(config.store == false, do: :disabled, else: :durable),
@@ -109,7 +114,7 @@ defmodule AgentHarness.SessionServer do
   @impl true
   def handle_continue({:open, reuse}, state) do
     task =
-      Task.Supervisor.async_nolink(AgentHarness.RunnerSupervisor, fn ->
+      Task.Supervisor.async(AgentHarness.RunnerSupervisor, fn ->
         with {:ok, replacement} <- reusable_session(state.store, state.session.id, reuse),
              {:ok, provider_handle, info} <-
                open_provider(state.provider, state.config, state.sink) do
@@ -314,11 +319,11 @@ defmodule AgentHarness.SessionServer do
     case finish_provider_open(state, result) do
       {:ok, state} ->
         notify_starter(state, {:ok, self()})
-        {:noreply, %{state | starter: nil}}
+        {:noreply, state}
 
       {:error, reason, state} ->
         notify_starter(state, {:error, reason})
-        {:stop, :normal, %{state | starter: nil}}
+        {:stop, :normal, clear_starter(state)}
     end
   end
 
@@ -342,7 +347,11 @@ defmodule AgentHarness.SessionServer do
       ) do
     _ = Task.shutdown(task, :brutal_kill)
     notify_starter(state, {:error, :session_start_timeout})
-    {:stop, :normal, %{state | starter: nil, open_task: nil, open_timer: nil}}
+
+    {:stop, :normal,
+     state
+     |> clear_starter()
+     |> Map.merge(%{open_task: nil, open_timer: nil})}
   end
 
   def handle_info({:provider_open_timeout, _stale_ref}, state), do: {:noreply, state}
@@ -368,6 +377,13 @@ defmodule AgentHarness.SessionServer do
   end
 
   def handle_info({:provider_turn_start_timeout, _stale_ref}, state), do: {:noreply, state}
+
+  def handle_info(
+        {__MODULE__, starter_ref, :starter_ack},
+        %State{starter: {_pid, starter_ref}} = state
+      ) do
+    {:noreply, clear_starter(state)}
+  end
 
   def handle_info(
         {:agent_harness_provider, sink_ref, {:event, turn_id, type, data, raw}},
@@ -441,10 +457,15 @@ defmodule AgentHarness.SessionServer do
         {:agent_harness_provider, sink_ref, {:transport_down, reason}},
         %State{sink: %Sink{ref: sink_ref}} = state
       ) do
-    if turn_starting?(state) do
-      {:noreply, defer_provider_message(state, {:transport_down, reason})}
-    else
-      {:noreply, transport_down(state, reason)}
+    cond do
+      state.status == :opening ->
+        {:noreply, record_open_failure(state, reason)}
+
+      turn_starting?(state) ->
+        {:noreply, defer_provider_message(state, {:transport_down, reason})}
+
+      true ->
+        {:noreply, transport_down(state, reason)}
     end
   end
 
@@ -459,7 +480,11 @@ defmodule AgentHarness.SessionServer do
     cancel_timer(state.open_timer)
     reason = {:provider_open_task_down, reason}
     notify_starter(state, {:error, reason})
-    {:stop, :normal, %{state | starter: nil, open_task: nil, open_timer: nil}}
+
+    {:stop, :normal,
+     state
+     |> clear_starter()
+     |> Map.merge(%{open_task: nil, open_timer: nil})}
   end
 
   def handle_info(
@@ -484,7 +509,19 @@ defmodule AgentHarness.SessionServer do
         %State{provider_monitor: monitor} = state
       ) do
     state = %{state | provider_monitor: nil}
-    {:noreply, transport_down(state, reason)}
+
+    if turn_starting?(state) do
+      {:noreply, defer_provider_message(state, {:transport_down, reason})}
+    else
+      {:noreply, transport_down(state, reason)}
+    end
+  end
+
+  def handle_info(
+        {:DOWN, monitor, :process, _pid, _reason},
+        %State{starter_monitor: monitor} = state
+      ) do
+    {:stop, :normal, clear_starter(state)}
   end
 
   def handle_info({:DOWN, monitor, :process, _pid, _reason}, state) do
@@ -502,6 +539,39 @@ defmodule AgentHarness.SessionServer do
     end
   end
 
+  def handle_info(
+        {:EXIT, pid, reason},
+        %State{open_task: %Task{pid: pid}} = state
+      )
+      when reason != :normal do
+    cancel_timer(state.open_timer)
+    failure = {:provider_open_task_down, reason}
+    notify_starter(state, {:error, failure})
+
+    {:stop, :normal,
+     state
+     |> clear_starter()
+     |> Map.merge(%{open_task: nil, open_timer: nil})}
+  end
+
+  def handle_info(
+        {:EXIT, pid, reason},
+        %State{turn_start_task: %Task{pid: pid}} = state
+      )
+      when reason != :normal do
+    cancel_timer(state.turn_start_timer)
+
+    state = %{
+      state
+      | turn_start_task: nil,
+        turn_start_timer: nil,
+        deferred_provider_messages: :queue.new()
+    }
+
+    failure = {:provider_turn_start_task_down, reason}
+    retire_uncertain_turn_start(state, failure, {:provider_turn_start_uncertain, failure})
+  end
+
   # Keep this catch-all last so linked provider implementations can use normal
   # OTP shutdown without crashing a trapping SessionServer.
   def handle_info({:EXIT, _pid, :normal}, state), do: {:noreply, state}
@@ -509,7 +579,16 @@ defmodule AgentHarness.SessionServer do
   def handle_info({:EXIT, _pid, :shutdown}, state), do: {:stop, :shutdown, state}
 
   def handle_info({:EXIT, _pid, reason}, state) do
-    {:noreply, transport_down(state, reason)}
+    cond do
+      state.status == :opening ->
+        {:noreply, record_open_failure(state, reason)}
+
+      turn_starting?(state) ->
+        {:noreply, defer_provider_message(state, {:transport_down, reason})}
+
+      true ->
+        {:noreply, transport_down(state, reason)}
+    end
   end
 
   @impl true
@@ -519,11 +598,12 @@ defmodule AgentHarness.SessionServer do
     shutdown_task(state.open_task)
     shutdown_task(state.turn_start_task)
 
+    state = maybe_persist_shutdown(reason, state)
+
     if state.provider_handle do
       safe_close_provider(state.provider, state.provider_handle)
     end
 
-    state = maybe_persist_shutdown(reason, state)
     stop_session_telemetry(state, reason)
     :ok
   end
@@ -536,6 +616,15 @@ defmodule AgentHarness.SessionServer do
     end
   end
 
+  defp finish_provider_open(
+         %State{open_failure: reason} = state,
+         {:ok, provider_handle, _info, _replacement}
+       )
+       when not is_nil(reason) do
+    safe_close_provider(state.provider, provider_handle)
+    {:error, {:provider_open_failed, {:transport_down, reason}}, state}
+  end
+
   defp finish_provider_open(state, {:ok, provider_handle, info, replacement})
        when is_map(info) do
     case replace_stored_session(state.store, state.session.id, replacement) do
@@ -546,6 +635,11 @@ defmodule AgentHarness.SessionServer do
         safe_close_provider(state.provider, provider_handle)
         {:error, reason, clear_provider(state)}
     end
+  end
+
+  defp finish_provider_open(%State{open_failure: failure} = state, {:error, _reason})
+       when not is_nil(failure) do
+    {:error, {:provider_open_failed, {:transport_down, failure}}, state}
   end
 
   defp finish_provider_open(state, {:error, reason}) do
@@ -664,7 +758,7 @@ defmodule AgentHarness.SessionServer do
 
   defp safe_close_provider(provider, provider_handle) do
     task =
-      Task.Supervisor.async_nolink(AgentHarness.RunnerSupervisor, fn ->
+      Task.Supervisor.async(AgentHarness.RunnerSupervisor, fn ->
         provider.close_session(provider_handle)
       end)
 
@@ -737,6 +831,16 @@ defmodule AgentHarness.SessionServer do
   defp start_provider_turn(state, turn, input, provider_opts) do
     turn = %{turn | status: :starting}
 
+    state = %{
+      state
+      | status: :starting,
+        current_turn: turn,
+        turns: Map.put(state.turns, turn.id, turn)
+    }
+
+    state = persist_turn(state, turn)
+    state = persist_session(state)
+
     turn_started_monotonic =
       Telemetry.start([:turn], %{
         session_id: state.session.id,
@@ -744,16 +848,7 @@ defmodule AgentHarness.SessionServer do
         turn_id: turn.id
       })
 
-    state = %{
-      state
-      | status: :starting,
-        current_turn: turn,
-        turn_started_monotonic: turn_started_monotonic,
-        turns: Map.put(state.turns, turn.id, turn)
-    }
-
-    state = persist_turn(state, turn)
-    state = persist_session(state)
+    state = %{state | turn_started_monotonic: turn_started_monotonic}
 
     case start_turn_task(state, turn, input, provider_opts) do
       {:ok, task} ->
@@ -775,7 +870,7 @@ defmodule AgentHarness.SessionServer do
 
   defp start_turn_task(state, turn, input, provider_opts) do
     {:ok,
-     Task.Supervisor.async_nolink(AgentHarness.RunnerSupervisor, fn ->
+     Task.Supervisor.async(AgentHarness.RunnerSupervisor, fn ->
        state.provider.start_turn(state.provider_handle, turn, input, provider_opts)
      end)}
   catch
@@ -852,12 +947,7 @@ defmodule AgentHarness.SessionServer do
     messages = :queue.to_list(state.deferred_provider_messages)
     state = %{state | deferred_provider_messages: :queue.new()}
 
-    Enum.reduce_while(messages, state, fn message, acc ->
-      case apply_deferred_provider_message(acc, message) do
-        %State{} = next -> {:cont, next}
-        {:stop, %State{} = next} -> {:halt, next}
-      end
-    end)
+    Enum.reduce(messages, state, &apply_deferred_provider_message(&2, &1))
   end
 
   defp apply_deferred_provider_message(state, {:event, turn_id, type, data, raw}) do
@@ -887,14 +977,13 @@ defmodule AgentHarness.SessionServer do
       state
       |> expire_pending_requests(turn_id)
       |> complete_turn(turn_id, status, result, raw)
-      |> then(&{:stop, &1})
     else
       state
     end
   end
 
   defp apply_deferred_provider_message(state, {:transport_down, reason}) do
-    {:stop, transport_down(state, reason)}
+    transport_down(state, reason)
   end
 
   defp handle_provider_event(state, turn_id, type, data, raw) do
@@ -1326,6 +1415,12 @@ defmodule AgentHarness.SessionServer do
     persist_session(state)
   end
 
+  defp close_state(%State{current_turn: %Turn{id: turn_id}} = state) do
+    state = expire_pending_requests(state, turn_id)
+    state = complete_turn(state, turn_id, :interrupted, %{reason: :session_shutdown}, nil)
+    close_state(state)
+  end
+
   defp close_state(state) do
     state = %{state | status: :closed}
     state = persist_session(state)
@@ -1445,6 +1540,19 @@ defmodule AgentHarness.SessionServer do
   end
 
   defp notify_starter(_state, _result), do: :ok
+
+  defp clear_starter(%State{starter_monitor: nil} = state), do: %{state | starter: nil}
+
+  defp clear_starter(%State{starter_monitor: monitor} = state) do
+    Process.demonitor(monitor, [:flush])
+    %{state | starter: nil, starter_monitor: nil}
+  end
+
+  defp record_open_failure(%State{open_failure: nil} = state, reason) do
+    %{state | open_failure: reason}
+  end
+
+  defp record_open_failure(state, _reason), do: state
 
   defp cancel_timer(nil), do: :ok
   defp cancel_timer(timer), do: Process.cancel_timer(timer, async: true, info: false)

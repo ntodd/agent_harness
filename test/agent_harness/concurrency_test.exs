@@ -65,6 +65,55 @@ defmodule AgentHarness.ConcurrencyTest do
     def capabilities(_handle), do: Capabilities.new(cancel: :native)
   end
 
+  defmodule OwnershipProvider do
+    @behaviour AgentHarness.Provider
+
+    @impl true
+    def open_session(config, _sink) do
+      test_pid = config.provider_options.test_pid
+
+      case config.provider_options[:open] do
+        :block ->
+          send(test_pid, {:provider_open_entered, self()})
+
+          receive do
+            :release_open -> {:ok, %{test_pid: test_pid}, %{}}
+          end
+
+        _other ->
+          {:ok, %{test_pid: test_pid}, %{}}
+      end
+    end
+
+    @impl true
+    def start_turn(handle, %Turn{} = turn, _input, opts) do
+      send(handle.test_pid, {:provider_turn_entered, self()})
+
+      if opts[:block] do
+        receive do
+          :release_turn -> {:ok, turn.id}
+        end
+      else
+        {:ok, turn.id}
+      end
+    end
+
+    @impl true
+    def respond(_handle, _provider_ref, _response), do: :ok
+
+    @impl true
+    def cancel(_handle, _provider_ref), do: :ok
+
+    @impl true
+    def close_session(handle) do
+      send(handle.test_pid, :ownership_provider_closed)
+      :ok
+    end
+
+    @impl true
+    def capabilities(_handle), do: Capabilities.new()
+  end
+
   defmodule SlowClaudeClient do
     @behaviour AgentHarness.Providers.Claude.Client
 
@@ -190,6 +239,81 @@ defmodule AgentHarness.ConcurrencyTest do
     assert {:error, :session_start_timeout} = Task.await(slow, 1_000)
     assert AgentHarness.whereis("timed-out-open") == nil
     assert :ok = AgentHarness.stop_session(session)
+  end
+
+  test "the outer startup timeout kills the provider-open task with its suspended session" do
+    parent = self()
+
+    starter =
+      spawn(fn ->
+        result =
+          AgentHarness.start_session(:ownership,
+            id: "outer-timeout-#{System.unique_integer([:positive])}",
+            provider_module: OwnershipProvider,
+            provider_options: %{test_pid: parent, open: :block},
+            startup_timeout: 20
+          )
+
+        send(parent, {:outer_timeout_result, result})
+      end)
+
+    assert_receive {:provider_open_entered, provider_task}
+
+    [session] =
+      AgentHarness.list_sessions() |> Enum.filter(&String.starts_with?(&1.id, "outer-timeout-"))
+
+    server = AgentHarness.whereis(session.id)
+    :ok = :sys.suspend(server)
+
+    provider_monitor = Process.monitor(provider_task)
+    starter_monitor = Process.monitor(starter)
+
+    assert_receive {:outer_timeout_result, {:error, :session_start_timeout}}, 500
+    assert_receive {:DOWN, ^starter_monitor, :process, ^starter, :normal}
+    assert_receive {:DOWN, ^provider_monitor, :process, ^provider_task, :killed}
+    assert AgentHarness.whereis(session.id) == nil
+  end
+
+  test "a starter that dies before readiness cannot orphan a session" do
+    parent = self()
+    id = "dead-starter-#{System.unique_integer([:positive])}"
+
+    starter =
+      Task.Supervisor.async_nolink(AgentHarness.RunnerSupervisor, fn ->
+        AgentHarness.start_session(:ownership,
+          id: id,
+          provider_module: OwnershipProvider,
+          provider_options: %{test_pid: parent, open: :block},
+          startup_timeout: 1_000
+        )
+      end)
+
+    assert_receive {:provider_open_entered, provider_task}
+    server = AgentHarness.whereis(id)
+    server_monitor = Process.monitor(server)
+    provider_monitor = Process.monitor(provider_task)
+
+    Process.exit(starter.pid, :kill)
+
+    assert_receive {:DOWN, ^server_monitor, :process, ^server, :normal}, 500
+    assert_receive {:DOWN, ^provider_monitor, :process, ^provider_task, :killed}, 500
+    assert AgentHarness.whereis(id) == nil
+  end
+
+  test "killing a session during turn admission kills the provider task" do
+    assert {:ok, session} =
+             AgentHarness.start_session(:ownership,
+               provider_module: OwnershipProvider,
+               provider_options: %{test_pid: self()}
+             )
+
+    assert {:ok, _turn} = AgentHarness.start_turn(session, "work", block: true)
+    assert_receive {:provider_turn_entered, provider_task}
+    provider_monitor = Process.monitor(provider_task)
+
+    Process.exit(AgentHarness.whereis(session.id), :kill)
+
+    assert_receive {:DOWN, ^provider_monitor, :process, ^provider_task, :killed}, 500
   end
 
   test "Claude runtime readiness does not serialize ProviderSupervisor" do

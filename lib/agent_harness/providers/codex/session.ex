@@ -3,7 +3,7 @@ defmodule AgentHarness.Providers.Codex.Session do
 
   use GenServer
 
-  alias AgentHarness.Provider.Sink
+  alias AgentHarness.Provider.{OpenGuardian, Sink}
   alias AgentHarness.Providers.Codex.{Config, Normalizer, Protocol}
   alias AgentHarness.{Response, SessionConfig, Turn}
   alias Codex.Events
@@ -77,32 +77,35 @@ defmodule AgentHarness.Providers.Codex.Session do
     config = Keyword.fetch!(opts, :config)
     sink = Keyword.fetch!(opts, :sink)
     owner = Keyword.fetch!(opts, :owner)
+    guardian = OpenGuardian.start(self(), owner)
 
-    {:ok, {:opening, config, sink, owner}, {:continue, :open}}
+    {:ok, {:opening, config, sink, owner, guardian}, {:continue, :open}}
   end
 
   @impl true
-  def handle_continue(:open, {:opening, config, sink, owner}) do
+  def handle_continue(:open, {:opening, config, sink, owner, guardian}) do
     with {:ok, prepared} <- Config.prepare(config),
          {:ok, codex_options} <- prepared.client.options(prepared.codex_options),
          :ok <- Config.validate_resolved_options(prepared, codex_options),
          {:ok, connection} <-
            prepared.client.connect(codex_options, prepared.connect_options) do
-      {:noreply,
-       %State{
-         owner: owner,
-         owner_monitor: Process.monitor(owner),
-         connection_monitor: monitor_connection(connection),
-         config: config,
-         prepared: prepared,
-         client: prepared.client,
-         codex_options: codex_options,
-         connection: connection,
-         sink: sink,
-         provider_session_id: prepared.provider_session_id
-       }}
+      state = %State{
+        owner: owner,
+        owner_monitor: Process.monitor(owner),
+        connection_monitor: monitor_connection(connection),
+        config: config,
+        prepared: prepared,
+        client: prepared.client,
+        codex_options: codex_options,
+        connection: connection,
+        sink: sink,
+        provider_session_id: prepared.provider_session_id
+      }
+
+      OpenGuardian.disarm(guardian)
+      {:noreply, state}
     else
-      {:error, reason} -> {:stop, reason, {:opening, config, sink, owner}}
+      {:error, reason} -> {:stop, reason, {:opening, config, sink, owner, guardian}}
     end
   end
 
@@ -262,7 +265,7 @@ defmodule AgentHarness.Providers.Codex.Session do
 
   @impl true
   def terminate(_reason, %State{} = state), do: cleanup(state)
-  def terminate(_reason, {:opening, _config, _sink, _owner}), do: :ok
+  def terminate(_reason, {:opening, _config, _sink, _owner, _guardian}), do: :ok
 
   defp build_thread(%{provider_session_id: nil} = state, thread_options) do
     state.client.start_thread(state.codex_options, thread_options)

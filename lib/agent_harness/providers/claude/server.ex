@@ -3,7 +3,7 @@ defmodule AgentHarness.Providers.Claude.Server do
 
   use GenServer
 
-  alias AgentHarness.Provider.Sink
+  alias AgentHarness.Provider.{OpenGuardian, Sink}
   alias AgentHarness.Providers.Claude.Options
   alias AgentHarness.{Response, Turn}
 
@@ -106,17 +106,22 @@ defmodule AgentHarness.Providers.Claude.Server do
 
     config = Keyword.fetch!(opts, :config)
     sink = Keyword.fetch!(opts, :sink)
+    guardian = OpenGuardian.start(self(), sink.pid)
 
-    {:ok, {:opening, config, sink}, {:continue, :open}}
+    {:ok, {:opening, config, sink, guardian}, {:continue, :open}}
   end
 
   @impl true
-  def handle_continue(:open, {:opening, config, sink} = opening) do
+  def handle_continue(:open, {:opening, config, sink, guardian} = opening) do
     case Options.prepare(config) do
       {:ok, prepared} ->
         case start_client(config, sink, prepared) do
-          {:ok, state} -> {:noreply, state}
-          {:stop, reason} -> {:stop, reason, opening}
+          {:ok, state} ->
+            OpenGuardian.disarm(guardian)
+            {:noreply, state}
+
+          {:stop, reason} ->
+            {:stop, reason, opening}
         end
 
       {:error, reason} ->
@@ -364,7 +369,7 @@ defmodule AgentHarness.Providers.Claude.Server do
     :ok
   end
 
-  def terminate(_reason, {:opening, _config, _sink}), do: :ok
+  def terminate(_reason, {:opening, _config, _sink, _guardian}), do: :ok
 
   defp start_client(config, sink, prepared) do
     server = self()

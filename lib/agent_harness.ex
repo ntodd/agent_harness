@@ -436,6 +436,7 @@ defmodule AgentHarness do
 
     receive do
       {SessionServer, ^start_ref, {:ok, ^pid}} ->
+        send(pid, {SessionServer, start_ref, :starter_ack})
         Process.demonitor(monitor, [:flush])
         {:ok, session}
 
@@ -455,10 +456,20 @@ defmodule AgentHarness do
         result
     after
       timeout + 100 ->
-        Process.demonitor(monitor, [:flush])
         if Process.alive?(pid), do: Process.exit(pid, :kill)
+        await_timed_out_session_down(monitor, pid, session.id)
         {:error, :session_start_timeout}
     end
+  end
+
+  defp await_timed_out_session_down(monitor, pid, session_id) do
+    receive do
+      {:DOWN, ^monitor, :process, ^pid, _reason} -> :ok
+    after
+      1_000 -> Process.demonitor(monitor, [:flush])
+    end
+
+    await_registry_release(session_id)
   end
 
   defp normalize_start_exit({:shutdown, reason}), do: reason

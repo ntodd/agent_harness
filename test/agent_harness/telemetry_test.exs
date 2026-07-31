@@ -74,6 +74,40 @@ defmodule AgentHarness.TelemetryTest do
     refute inspect(store_metadata) =~ "secret prompt"
   end
 
+  @tag capture_log: true
+  test "a failed initial turn checkpoint does not leave an unmatched turn span" do
+    test_pid = self()
+    handler_id = {__MODULE__, make_ref()}
+
+    :ok =
+      :telemetry.attach_many(
+        handler_id,
+        [[:agent_harness, :turn, :start], [:agent_harness, :turn, :stop]],
+        &__MODULE__.handle_event/4,
+        test_pid
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    store = start_supervised!({AgentHarness.Store.Memory, id: make_ref()})
+
+    expect(ProviderMock, :open_session, fn _config, _sink ->
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    {:ok, session} =
+      AgentHarness.start_session(:test,
+        provider_module: ProviderMock,
+        store: {AgentHarness.SessionPersistenceTest.TurnFailingStore, store},
+        store_failure: :stop
+      )
+
+    assert {:error, {:session_call_failed, _reason}} = AgentHarness.start_turn(session, "fail")
+    refute_receive {:telemetry, [:agent_harness, :turn, :start], _, _}, 50
+    refute_receive {:telemetry, [:agent_harness, :turn, :stop], _, _}, 50
+  end
+
   def handle_event(event, measurements, metadata, pid) do
     send(pid, {:telemetry, event, measurements, metadata})
   end

@@ -177,6 +177,8 @@ defmodule AgentHarness.SessionFailureTest do
     assert turn_id == turn.id
     assert result == %{reason: :killed}
     assert %{status: :unavailable, current_turn: nil} = AgentHarness.status(session)
+    assert {:error, :session_unavailable} = AgentHarness.start_turn(session, "Retry")
+    assert {:error, :session_unavailable} = AgentHarness.capabilities(session)
     assert :ok = AgentHarness.stop_session(session)
   end
 end

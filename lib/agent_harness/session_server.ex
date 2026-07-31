@@ -120,6 +120,10 @@ defmodule AgentHarness.SessionServer do
     {:reply, snapshot, state}
   end
 
+  def handle_call(:capabilities, _from, %State{status: :unavailable} = state) do
+    {:reply, {:error, :session_unavailable}, state}
+  end
+
   def handle_call(:capabilities, _from, state) do
     {:reply, state.provider.capabilities(state.provider_handle), state}
   end
@@ -161,6 +165,10 @@ defmodule AgentHarness.SessionServer do
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
+  end
+
+  def handle_call({:start_turn, _input, _opts}, _from, %State{status: :unavailable} = state) do
+    {:reply, {:error, :session_unavailable}, state}
   end
 
   def handle_call({:start_turn, _input, _opts}, _from, state) do

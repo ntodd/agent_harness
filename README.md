@@ -60,15 +60,18 @@ provider-policy boundary and current official links.
 
 ## Installation
 
-Until the package is published, use a path dependency:
+Add AgentHarness to your dependencies:
 
 ```elixir
 def deps do
   [
-    {:agent_harness, path: "../agent_harness"}
+    {:agent_harness, "~> 0.1.0"}
   ]
 end
 ```
+
+For local development against a checkout, use `path: "../agent_harness"`
+instead.
 
 Then fetch and compile dependencies:
 

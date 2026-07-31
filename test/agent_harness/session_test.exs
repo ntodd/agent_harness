@@ -77,6 +77,20 @@ defmodule AgentHarness.SessionTest do
     assert {:error, {:invalid_force, :yes}} =
              AgentHarness.stop_session(session, force: :yes)
 
+    forged_request =
+      Request.new(
+        session_id: session.id,
+        turn_id: "turn-1",
+        kind: :permission,
+        provider_ref: :permission
+      )
+
+    assert {:error, {:invalid_response, _response}} =
+             AgentHarness.respond(
+               forged_request,
+               %Response{action: :approve, scope: :totally_bogus}
+             )
+
     assert %{status: :idle, current_turn: nil} = AgentHarness.status(session)
     assert Process.alive?(server)
     assert :ok = AgentHarness.stop_session(session)
@@ -113,13 +127,13 @@ defmodule AgentHarness.SessionTest do
 
     assert_receive_event(subscription, :session_ready, 1)
 
-    assert {:ok, %Turn{id: first_turn_id, status: :running} = first_turn} =
+    assert {:ok, %Turn{id: first_turn_id, status: :starting}} =
              AgentHarness.start_turn(session, "First")
 
     assert_receive {:provider_started, ^first_turn_id}
     assert_receive_event(subscription, :turn_started, 2, first_turn_id)
 
-    assert {:error, {:turn_in_progress, ^first_turn}} =
+    assert {:error, {:turn_in_progress, %Turn{id: ^first_turn_id, status: :running}}} =
              AgentHarness.start_turn(session, "Rejected")
 
     raw = %{"type" => "item.agentMessage.delta"}
@@ -147,7 +161,11 @@ defmodule AgentHarness.SessionTest do
     assert_receive_event(subscription, :turn_completed, 4, first_turn_id)
 
     assert %{status: :idle, current_turn: nil} = AgentHarness.status(session)
-    assert {:ok, %Turn{status: :running}} = AgentHarness.start_turn(session, "Second")
+
+    assert {:ok, %Turn{id: second_turn_id, status: :starting}} =
+             AgentHarness.start_turn(session, "Second")
+
+    assert_receive_event(subscription, :turn_started, 5, second_turn_id)
 
     :ok = AgentHarness.stop_session(session, force: true)
   end

@@ -19,7 +19,14 @@ defmodule AgentHarness.Providers.Claude do
            {Server, config: config, sink: sink}
          ) do
       {:ok, server} ->
-        {:ok, server, %{provider_session_id: Server.provider_session_id(server)}}
+        case Server.provider_session_id(server) do
+          {:ok, provider_session_id} ->
+            {:ok, server, %{provider_session_id: provider_session_id}}
+
+          {:error, reason} ->
+            _ = DynamicSupervisor.terminate_child(AgentHarness.ProviderSupervisor, server)
+            {:error, reason}
+        end
 
       {:error, reason} ->
         {:error, reason}

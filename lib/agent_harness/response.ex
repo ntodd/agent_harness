@@ -21,7 +21,17 @@ defmodule AgentHarness.Response do
 
   @spec approve(keyword()) :: t()
   def approve(opts \\ []) do
-    %__MODULE__{action: :approve, scope: Keyword.get(opts, :scope, :once)}
+    unless Keyword.keyword?(opts) do
+      raise ArgumentError, "approval options must be a keyword list"
+    end
+
+    scope = Keyword.get(opts, :scope, :once)
+
+    unless scope in [:once, :session, nil] do
+      raise ArgumentError, "approval scope must be :once, :session, or nil"
+    end
+
+    %__MODULE__{action: :approve, scope: scope}
   end
 
   @spec deny(String.t() | nil) :: t()
@@ -29,4 +39,16 @@ defmodule AgentHarness.Response do
 
   @spec cancel(String.t() | nil) :: t()
   def cancel(reason \\ nil), do: %__MODULE__{action: :cancel, reason: reason}
+
+  @doc false
+  @spec validate(t()) :: :ok | {:error, term()}
+  def validate(%__MODULE__{action: :approve, scope: scope})
+      when scope in [:once, :session, nil],
+      do: :ok
+
+  def validate(%__MODULE__{action: action, scope: nil})
+      when action in [:answer, :deny, :cancel],
+      do: :ok
+
+  def validate(%__MODULE__{} = response), do: {:error, {:invalid_response, response}}
 end

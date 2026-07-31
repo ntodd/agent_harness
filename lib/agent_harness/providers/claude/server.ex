@@ -49,9 +49,9 @@ defmodule AgentHarness.Providers.Claude.Server do
   end
 
   @type provider_request_ref :: reference()
-  @call_timeout 5_000
-  @client_interrupt_timeout 3_000
-  @client_stop_timeout 1_000
+  @default_call_timeout 5_000
+  @default_client_interrupt_timeout 3_000
+  @default_client_stop_timeout 1_000
 
   def child_spec(opts) do
     config = Keyword.fetch!(opts, :config)
@@ -68,8 +68,8 @@ defmodule AgentHarness.Providers.Claude.Server do
 
   def provider_session_id(server) do
     case call(server, :provider_session_id) do
-      {:error, _reason} -> nil
-      provider_session_id -> provider_session_id
+      {:error, reason} -> {:error, reason}
+      provider_session_id -> {:ok, provider_session_id}
     end
   end
 
@@ -107,16 +107,24 @@ defmodule AgentHarness.Providers.Claude.Server do
     config = Keyword.fetch!(opts, :config)
     sink = Keyword.fetch!(opts, :sink)
 
+    {:ok, {:opening, config, sink}, {:continue, :open}}
+  end
+
+  @impl true
+  def handle_continue(:open, {:opening, config, sink} = opening) do
     case Options.prepare(config) do
       {:ok, prepared} ->
-        start_client(config, sink, prepared)
+        case start_client(config, sink, prepared) do
+          {:ok, state} -> {:noreply, state}
+          {:stop, reason} -> {:stop, reason, opening}
+        end
 
       {:error, reason} ->
-        {:stop, {:invalid_claude_options, reason}}
+        {:stop, {:invalid_claude_options, reason}, opening}
     end
   rescue
     error ->
-      {:stop, {:claude_start_failed, error}}
+      {:stop, {:claude_start_failed, error}, opening}
   end
 
   @impl true
@@ -344,7 +352,7 @@ defmodule AgentHarness.Providers.Claude.Server do
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
-  def terminate(_reason, state) do
+  def terminate(_reason, %State{} = state) do
     reject_all_pending(state, "Session closed")
 
     if is_pid(state.runner) and Process.alive?(state.runner) do
@@ -355,6 +363,8 @@ defmodule AgentHarness.Providers.Claude.Server do
     cleanup(state.cleanup_paths)
     :ok
   end
+
+  def terminate(_reason, {:opening, _config, _sink}), do: :ok
 
   defp start_client(config, sink, prepared) do
     server = self()
@@ -954,7 +964,7 @@ defmodule AgentHarness.Providers.Claude.Server do
   end
 
   defp safe_stop(client, client_session) do
-    case bounded_invoke(fn -> client.stop(client_session) end, @client_stop_timeout) do
+    case bounded_invoke(fn -> client.stop(client_session) end, client_stop_timeout()) do
       {:error, :timeout} ->
         kill_client(client_session)
         :ok
@@ -973,7 +983,7 @@ defmodule AgentHarness.Providers.Claude.Server do
   defp safe_interrupt(client, client_session) do
     case bounded_invoke(
            fn -> client.interrupt(client_session) end,
-           @client_interrupt_timeout
+           client_interrupt_timeout()
          ) do
       {:ok, :ok} -> :ok
       {:ok, {:error, reason}} -> {:error, reason}
@@ -1020,9 +1030,25 @@ defmodule AgentHarness.Providers.Claude.Server do
   end
 
   defp call(server, message) do
-    GenServer.call(server, message, @call_timeout)
+    GenServer.call(server, message, call_timeout())
   catch
     :exit, reason -> {:error, {:provider_call_failed, reason}}
+  end
+
+  defp call_timeout do
+    Application.get_env(:agent_harness, :claude_call_timeout, @default_call_timeout)
+  end
+
+  defp client_interrupt_timeout do
+    Application.get_env(
+      :agent_harness,
+      :claude_interrupt_timeout,
+      @default_client_interrupt_timeout
+    )
+  end
+
+  defp client_stop_timeout do
+    Application.get_env(:agent_harness, :claude_stop_timeout, @default_client_stop_timeout)
   end
 
   defp clear_runner(

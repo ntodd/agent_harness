@@ -78,12 +78,17 @@ defmodule AgentHarness.Providers.Codex.Session do
     sink = Keyword.fetch!(opts, :sink)
     owner = Keyword.fetch!(opts, :owner)
 
+    {:ok, {:opening, config, sink, owner}, {:continue, :open}}
+  end
+
+  @impl true
+  def handle_continue(:open, {:opening, config, sink, owner}) do
     with {:ok, prepared} <- Config.prepare(config),
          {:ok, codex_options} <- prepared.client.options(prepared.codex_options),
          :ok <- Config.validate_resolved_options(prepared, codex_options),
          {:ok, connection} <-
            prepared.client.connect(codex_options, prepared.connect_options) do
-      {:ok,
+      {:noreply,
        %State{
          owner: owner,
          owner_monitor: Process.monitor(owner),
@@ -97,7 +102,7 @@ defmodule AgentHarness.Providers.Codex.Session do
          provider_session_id: prepared.provider_session_id
        }}
     else
-      {:error, reason} -> {:stop, reason}
+      {:error, reason} -> {:stop, reason, {:opening, config, sink, owner}}
     end
   end
 
@@ -256,7 +261,8 @@ defmodule AgentHarness.Providers.Codex.Session do
     do: {:stop, :normal, state}
 
   @impl true
-  def terminate(_reason, state), do: cleanup(state)
+  def terminate(_reason, %State{} = state), do: cleanup(state)
+  def terminate(_reason, {:opening, _config, _sink, _owner}), do: :ok
 
   defp build_thread(%{provider_session_id: nil} = state, thread_options) do
     state.client.start_thread(state.codex_options, thread_options)
@@ -747,7 +753,8 @@ defmodule AgentHarness.Providers.Codex.Session do
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp safe_call(pid, message) do
-    {:ok, GenServer.call(pid, message)}
+    timeout = Application.get_env(:agent_harness, :codex_startup_call_timeout, 25_000)
+    {:ok, GenServer.call(pid, message, timeout)}
   catch
     :exit, reason -> {:error, reason}
   end

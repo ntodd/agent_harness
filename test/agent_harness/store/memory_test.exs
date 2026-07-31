@@ -59,6 +59,25 @@ defmodule AgentHarness.Store.MemoryTest do
     assert Memory.latest_sequence(store, "session-1") == {:ok, 4}
   end
 
+  test "turn event queries use the turn index before cursor and limit", %{store: store} do
+    assert :ok = Memory.save_session(store, "session-1", %{status: :running})
+    assert :ok = Memory.save_turn(store, Turn.new("session-1", "One", id: "turn-1"))
+    assert :ok = Memory.save_turn(store, Turn.new("session-1", "Two", id: "turn-2"))
+
+    first = event(1, id: "event-1")
+    second = %{event(2, id: "event-2") | turn_id: "turn-2"}
+    third = event(3, id: "event-3")
+
+    assert :ok = Memory.append_event(store, first)
+    assert :ok = Memory.append_event(store, second)
+    assert :ok = Memory.append_event(store, third)
+
+    assert {:ok, [^third]} =
+             Memory.events(store, "session-1", turn_id: "turn-1", after: 1, limit: 1)
+
+    assert {:ok, [^second]} = Memory.events(store, "session-1", turn_id: "turn-2")
+  end
+
   test "event appends are retry-safe and reject conflicts or older sequences", %{store: store} do
     assert :ok = Memory.save_session(store, "session-1", %{status: :running})
     assert :ok = Memory.save_turn(store, Turn.new("session-1", "Run", id: "turn-1"))

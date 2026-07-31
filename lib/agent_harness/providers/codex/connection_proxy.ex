@@ -201,12 +201,9 @@ defmodule AgentHarness.Providers.Codex.ConnectionProxy do
   end
 
   defp broadcast(state, message, method, params) do
-    Enum.reduce(state.subscribers, false, fn {pid, filters}, delivered? ->
+    Enum.each(state.subscribers, fn {pid, filters} ->
       if subscriber_match?(filters, method, params) do
         send(pid, message)
-        true
-      else
-        delivered?
       end
     end)
   end

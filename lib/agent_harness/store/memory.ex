@@ -32,7 +32,7 @@ defmodule AgentHarness.Store.Memory do
   defmodule EventLog do
     @moduledoc false
 
-    defstruct last_sequence: nil, reversed: [], by_sequence: %{}, ids: %{}
+    defstruct last_sequence: nil, reversed: [], by_sequence: %{}, by_turn: %{}, ids: %{}
   end
 
   @type option :: {:name, GenServer.name()} | {:id, term()}
@@ -66,41 +66,45 @@ defmodule AgentHarness.Store.Memory do
 
   @impl AgentHarness.Store
   def save_session(owner, session_id, snapshot) when is_binary(session_id) do
-    GenServer.call(owner, {:save_session, session_id, snapshot})
+    call(owner, {:save_session, session_id, snapshot})
   end
 
   @impl AgentHarness.Store
   def fetch_session(owner, session_id) when is_binary(session_id) do
-    GenServer.call(owner, {:fetch_session, session_id})
+    call(owner, {:fetch_session, session_id})
   end
 
   @impl AgentHarness.Store
-  def list_sessions(owner), do: GenServer.call(owner, :list_sessions)
+  def list_sessions(owner), do: call(owner, :list_sessions)
 
   @impl AgentHarness.Store
   def delete_session(owner, session_id) when is_binary(session_id) do
-    GenServer.call(owner, {:delete_session, session_id})
+    case live_session(session_id) do
+      nil -> call(owner, {:delete_session, session_id})
+      pid when pid == self() -> call(owner, {:delete_session, session_id})
+      _pid -> {:error, :session_active}
+    end
   end
 
   @impl AgentHarness.Store
   def save_turn(owner, %Turn{} = turn) do
-    GenServer.call(owner, {:save_turn, turn})
+    call(owner, {:save_turn, turn})
   end
 
   @impl AgentHarness.Store
   def fetch_turn(owner, session_id, turn_id)
       when is_binary(session_id) and is_binary(turn_id) do
-    GenServer.call(owner, {:fetch_turn, session_id, turn_id})
+    call(owner, {:fetch_turn, session_id, turn_id})
   end
 
   @impl AgentHarness.Store
   def list_turns(owner, session_id) when is_binary(session_id) do
-    GenServer.call(owner, {:list_turns, session_id})
+    call(owner, {:list_turns, session_id})
   end
 
   @impl AgentHarness.Store
   def append_event(owner, %Event{} = event) do
-    GenServer.call(owner, {:append_event, event})
+    call(owner, {:append_event, event})
   end
 
   @doc """
@@ -112,27 +116,28 @@ defmodule AgentHarness.Store.Memory do
   @spec events(GenServer.server(), String.t(), keyword()) ::
           {:ok, [Event.t()]} | {:error, term()}
   def events(owner, session_id, opts \\ []) when is_binary(session_id) and is_list(opts) do
-    opts = Keyword.validate!(opts, after: nil, limit: :infinity)
+    opts = Keyword.validate!(opts, after: nil, limit: :infinity, turn_id: nil)
     after_sequence = validate_after!(opts[:after])
     limit = validate_limit!(opts[:limit])
+    turn_id = validate_turn_id!(opts[:turn_id])
 
-    GenServer.call(owner, {:events, session_id, after_sequence, limit})
+    call(owner, {:events, session_id, after_sequence, limit, turn_id})
   end
 
   @impl AgentHarness.Store
   def latest_sequence(owner, session_id) when is_binary(session_id) do
-    GenServer.call(owner, {:latest_sequence, session_id})
+    call(owner, {:latest_sequence, session_id})
   end
 
   @impl AgentHarness.Store
   def save_request(owner, %Request{} = request) do
-    GenServer.call(owner, {:save_request, request})
+    call(owner, {:save_request, request})
   end
 
   @impl AgentHarness.Store
   def fetch_request(owner, session_id, request_id)
       when is_binary(session_id) and is_binary(request_id) do
-    GenServer.call(owner, {:fetch_request, session_id, request_id})
+    call(owner, {:fetch_request, session_id, request_id})
   end
 
   @doc """
@@ -144,7 +149,7 @@ defmodule AgentHarness.Store.Memory do
   def list_requests(owner, session_id, opts \\ [])
       when is_binary(session_id) and is_list(opts) do
     opts = Keyword.validate!(opts, turn_id: nil, status: nil)
-    GenServer.call(owner, {:list_requests, session_id, opts[:turn_id], opts[:status]})
+    call(owner, {:list_requests, session_id, opts[:turn_id], opts[:status]})
   end
 
   @impl true
@@ -225,13 +230,14 @@ defmodule AgentHarness.Store.Memory do
     end
   end
 
-  def handle_call({:events, session_id, after_sequence, limit}, _from, state) do
+  def handle_call({:events, session_id, after_sequence, limit, turn_id}, _from, state) do
     reply =
       if session?(state, session_id) do
+        log = Map.get(state.events, session_id, %EventLog{})
+
         events =
-          state.events
-          |> Map.get(session_id, %EventLog{})
-          |> then(&Enum.reverse(&1.reversed))
+          log
+          |> events_for_turn(turn_id)
           |> after_sequence(after_sequence)
           |> take(limit)
 
@@ -324,6 +330,7 @@ defmodule AgentHarness.Store.Memory do
            last_sequence: event.seq,
            reversed: [event | log.reversed],
            by_sequence: Map.put(log.by_sequence, event.seq, event),
+           by_turn: put_turn_event(log.by_turn, event),
            ids: Map.put(log.ids, event.id, event.seq)
          }}
     end
@@ -365,6 +372,20 @@ defmodule AgentHarness.Store.Memory do
   defp take(events, :infinity), do: events
   defp take(events, limit), do: Enum.take(events, limit)
 
+  defp events_for_turn(%EventLog{} = log, nil), do: Enum.reverse(log.reversed)
+
+  defp events_for_turn(%EventLog{} = log, turn_id) do
+    log.by_turn
+    |> Map.get(turn_id, [])
+    |> Enum.reverse()
+  end
+
+  defp put_turn_event(by_turn, %Event{turn_id: nil}), do: by_turn
+
+  defp put_turn_event(by_turn, %Event{turn_id: turn_id} = event) do
+    Map.update(by_turn, turn_id, [event], &[event | &1])
+  end
+
   defp filter_requests(requests, turn_id, status) do
     Enum.filter(requests, fn request ->
       (is_nil(turn_id) or request.turn_id == turn_id) and
@@ -385,5 +406,25 @@ defmodule AgentHarness.Store.Memory do
   defp validate_limit!(value) do
     raise ArgumentError,
           ":limit must be a non-negative integer or :infinity, got: #{inspect(value)}"
+  end
+
+  defp validate_turn_id!(nil), do: nil
+  defp validate_turn_id!(turn_id) when is_binary(turn_id) and byte_size(turn_id) > 0, do: turn_id
+
+  defp validate_turn_id!(value) do
+    raise ArgumentError, ":turn_id must be a non-empty string, got: #{inspect(value)}"
+  end
+
+  defp call(owner, message) do
+    timeout = Application.get_env(:agent_harness, :store_call_timeout, 5_000)
+    GenServer.call(owner, message, timeout)
+  end
+
+  defp live_session(session_id) do
+    AgentHarness.whereis(session_id)
+  rescue
+    _error -> nil
+  catch
+    :exit, _reason -> nil
   end
 end

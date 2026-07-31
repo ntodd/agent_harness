@@ -21,7 +21,8 @@ defmodule AgentHarness.Store do
   @type session_snapshot :: term()
   @type event_options :: [
           after: non_neg_integer(),
-          limit: non_neg_integer() | :infinity
+          limit: non_neg_integer() | :infinity,
+          turn_id: String.t()
         ]
   @type request_options :: [
           turn_id: String.t(),

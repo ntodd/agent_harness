@@ -141,6 +141,44 @@ defmodule AgentHarness.StreamTest do
     assert :ok = AgentHarness.stop_session(session)
   end
 
+  test "await uses terminal state and stream reports evicted replay history" do
+    test_pid = self()
+
+    expect(ProviderMock, :open_session, fn _config, sink ->
+      send(test_pid, {:sink, sink})
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :start_turn, 2, fn :provider_handle, turn, _input, [] ->
+      {:ok, turn.id}
+    end)
+
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    {:ok, session} =
+      AgentHarness.start_session(:test,
+        provider_module: ProviderMock,
+        store: false,
+        event_buffer_size: 2
+      )
+
+    assert_receive {:sink, sink}
+    {:ok, first} = AgentHarness.start_turn(session, "First")
+    Provider.Sink.finish(sink, first.id, :completed, %{generation: 1})
+    assert {:ok, %{status: :completed}} = AgentHarness.await(first, timeout: 1_000)
+
+    {:ok, second} = AgentHarness.start_turn(session, "Second")
+    Provider.Sink.emit(sink, second.id, :message_delta, %{text: "noise"})
+    Provider.Sink.finish(sink, second.id, :completed, %{generation: 2})
+    assert {:ok, %{status: :completed}} = AgentHarness.await(second, timeout: 1_000)
+
+    assert {:ok, %{status: :completed, result: %{generation: 1}}} =
+             AgentHarness.await(first)
+
+    assert {:error, :replay_unavailable} = AgentHarness.stream(first, from: :start)
+    assert :ok = AgentHarness.stop_session(session)
+  end
+
   defp wait_for_subscription(session_pid, attempts \\ 50)
 
   defp wait_for_subscription(_session_pid, 0), do: flunk("await did not subscribe")

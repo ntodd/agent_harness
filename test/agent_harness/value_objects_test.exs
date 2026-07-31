@@ -84,6 +84,11 @@ defmodule AgentHarness.ValueObjectsTest do
 
     assert Response.deny("Not in this workspace") ==
              %Response{action: :deny, reason: "Not in this workspace"}
+
+    assert_raise ArgumentError, fn -> Response.approve(scope: :totally_bogus) end
+
+    assert {:error, {:invalid_response, _response}} =
+             Response.validate(%Response{action: :approve, scope: :totally_bogus})
   end
 
   test "capabilities distinguish native, emulated, experimental, and unsupported support" do

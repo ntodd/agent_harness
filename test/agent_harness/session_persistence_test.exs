@@ -51,6 +51,26 @@ defmodule AgentHarness.SessionPersistenceTest do
     def events(_owner, _session_id, _options), do: raise("store unavailable")
   end
 
+  defmodule TurnFailingStore do
+    @behaviour AgentHarness.Store
+
+    alias AgentHarness.Store.Memory
+
+    defdelegate save_session(owner, session_id, snapshot), to: Memory
+    defdelegate fetch_session(owner, session_id), to: Memory
+    defdelegate list_sessions(owner), to: Memory
+    defdelegate delete_session(owner, session_id), to: Memory
+    def save_turn(_owner, _turn), do: {:error, :disk_full}
+    defdelegate fetch_turn(owner, session_id, turn_id), to: Memory
+    defdelegate list_turns(owner, session_id), to: Memory
+    defdelegate append_event(owner, event), to: Memory
+    defdelegate events(owner, session_id, options), to: Memory
+    defdelegate latest_sequence(owner, session_id), to: Memory
+    defdelegate save_request(owner, request), to: Memory
+    defdelegate fetch_request(owner, session_id, request_id), to: Memory
+    defdelegate list_requests(owner, session_id, options), to: Memory
+  end
+
   test "checkpoints sessions, provider ids, turns, requests, and ordered events" do
     test_pid = self()
     store = start_supervised!({Memory, id: make_ref()})
@@ -234,6 +254,178 @@ defmodule AgentHarness.SessionPersistenceTest do
              )
 
     assert {:ok, %{status: :closed}} = Store.Memory.fetch_session(store, session_id)
+  end
+
+  test "a live Memory aggregate cannot be purged" do
+    test_pid = self()
+    store = start_supervised!({Memory, id: make_ref()})
+
+    expect(ProviderMock, :open_session, fn _config, sink ->
+      send(test_pid, {:sink, sink})
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :start_turn, fn :provider_handle, _turn, "Still alive", [] ->
+      {:ok, "provider-turn"}
+    end)
+
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    {:ok, session} =
+      AgentHarness.start_session(:test,
+        id: "live-purge-#{System.unique_integer([:positive])}",
+        provider_module: ProviderMock,
+        store: {Memory, store}
+      )
+
+    assert_receive {:sink, sink}
+    assert {:error, :session_active} = Memory.delete_session(store, session.id)
+    assert {:error, :session_active} = AgentHarness.purge_session(session, store: {Memory, store})
+
+    assert {:ok, turn} = AgentHarness.start_turn(session, "Still alive")
+    Provider.Sink.finish(sink, turn.id, :completed)
+    assert {:ok, %{status: :completed}} = AgentHarness.await(turn, timeout: 1_000)
+    assert :ok = AgentHarness.stop_session(session)
+  end
+
+  test "store write failures explicitly degrade a live session instead of crashing it" do
+    store = start_supervised!({Memory, id: make_ref()})
+
+    expect(ProviderMock, :open_session, fn _config, _sink ->
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :start_turn, fn :provider_handle, _turn, "Degrade", [] ->
+      {:error, :rejected}
+    end)
+
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    {:ok, session} =
+      AgentHarness.start_session(:test,
+        provider_module: ProviderMock,
+        store: {TurnFailingStore, store}
+      )
+
+    {:ok, subscription} = AgentHarness.subscribe(session)
+    assert {:ok, turn} = AgentHarness.start_turn(session, "Degrade")
+
+    assert_receive {:agent_harness, ref,
+                    %AgentHarness.Event{
+                      type: :store_failed,
+                      data: %{operation: :save_turn, reason: :disk_full}
+                    }}
+
+    assert ref == subscription.ref
+
+    assert {:error, %AgentHarness.Event{type: :turn_failed}} =
+             AgentHarness.await(turn, timeout: 1_000)
+
+    assert %{status: :idle, durability: {:degraded, %{reason: :disk_full}}} =
+             AgentHarness.status(session)
+
+    assert :ok = AgentHarness.stop_session(session)
+  end
+
+  test "an explicitly reused closed id starts a fresh aggregate" do
+    store = start_supervised!({Memory, id: make_ref()})
+    session_id = "reused-#{System.unique_integer([:positive])}"
+
+    expect(ProviderMock, :open_session, 2, fn _config, _sink ->
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :close_session, 2, fn :provider_handle -> :ok end)
+
+    {:ok, first} =
+      AgentHarness.start_session(:test,
+        id: session_id,
+        provider_module: ProviderMock,
+        store: {Memory, store}
+      )
+
+    assert :ok = AgentHarness.stop_session(first)
+
+    assert {:ok, second} =
+             AgentHarness.start_session(:test,
+               id: session_id,
+               reuse: :closed,
+               provider_module: ProviderMock,
+               store: {Memory, store}
+             )
+
+    assert {:ok, events} = Memory.events(store, session_id)
+    assert Enum.map(events, & &1.type) == [:session_ready]
+    assert :ok = AgentHarness.stop_session(second)
+    assert :ok = AgentHarness.purge_session(second, store: {Memory, store})
+    assert :not_found = Memory.fetch_session(store, session_id)
+  end
+
+  test "shutdown closes the provider and persists the final session state" do
+    store = start_supervised!({Memory, id: make_ref()})
+
+    expect(ProviderMock, :open_session, fn _config, _sink ->
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    {:ok, session} =
+      AgentHarness.start_session(:test,
+        provider_module: ProviderMock,
+        store: {Memory, store}
+      )
+
+    server = AgentHarness.whereis(session.id)
+    monitor = Process.monitor(server)
+    Process.exit(server, :shutdown)
+
+    assert_receive {:DOWN, ^monitor, :process, ^server, :shutdown}
+    assert {:ok, %{status: :closed}} = Memory.fetch_session(store, session.id)
+    assert {:ok, events} = Memory.events(store, session.id)
+    assert List.last(events).type == :session_closed
+  end
+
+  @tag capture_log: true
+  test "inventory exposes stale snapshots for explicit replacement" do
+    store = start_supervised!({Memory, id: make_ref()})
+    session_id = "reconcile-#{System.unique_integer([:positive])}"
+
+    expect(ProviderMock, :open_session, 2, fn _config, _sink ->
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    {:ok, first} =
+      AgentHarness.start_session(:test,
+        id: session_id,
+        provider_module: ProviderMock,
+        store: {Memory, store}
+      )
+
+    assert first in AgentHarness.list_sessions()
+
+    assert {:ok, [%{session_id: ^session_id, live?: true}]} =
+             AgentHarness.list_stored_sessions(store: {Memory, store})
+
+    server = AgentHarness.whereis(session_id)
+    monitor = Process.monitor(server)
+    Process.exit(server, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^server, :killed}
+
+    assert {:ok, [%{session_id: ^session_id, live?: false}]} =
+             AgentHarness.list_stored_sessions(store: {Memory, store})
+
+    assert {:ok, replacement} =
+             AgentHarness.start_session(:test,
+               id: session_id,
+               reuse: :replace,
+               provider_module: ProviderMock,
+               store: {Memory, store}
+             )
+
+    assert :ok = AgentHarness.stop_session(replacement)
   end
 
   defp eventually(fun, attempts \\ 50)

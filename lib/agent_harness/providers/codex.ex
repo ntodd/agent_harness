@@ -14,7 +14,7 @@ defmodule AgentHarness.Providers.Codex do
   alias AgentHarness.Provider.Sink
   alias AgentHarness.Providers.Codex.Session
 
-  @call_timeout 35_000
+  @default_call_timeout 25_000
 
   @capabilities Capabilities.new(
                   token_streaming: :native,
@@ -30,7 +30,7 @@ defmodule AgentHarness.Providers.Codex do
 
   @impl true
   def open_session(%SessionConfig{} = config, %Sink{} = sink) do
-    Session.start(config, sink, self())
+    Session.start(config, sink, sink.pid)
   end
 
   @impl true
@@ -60,10 +60,15 @@ defmodule AgentHarness.Providers.Codex do
   def capabilities(_session), do: @capabilities
 
   defp call(session, message) when is_pid(session) do
-    GenServer.call(session, message, @call_timeout)
+    GenServer.call(session, message, call_timeout())
   catch
     :exit, {:noproc, _details} -> {:error, :provider_not_found}
-    :exit, {:normal, _details} -> :ok
+    :exit, {:normal, _details} -> {:error, :provider_not_found}
+    :exit, {:timeout, _details} -> {:error, :provider_call_timeout}
     :exit, reason -> {:error, {:provider_call_failed, reason}}
+  end
+
+  defp call_timeout do
+    Application.get_env(:agent_harness, :codex_call_timeout, @default_call_timeout)
   end
 end

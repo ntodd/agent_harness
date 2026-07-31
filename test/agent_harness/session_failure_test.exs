@@ -3,7 +3,7 @@ defmodule AgentHarness.SessionFailureTest do
 
   import Mox
 
-  alias AgentHarness.{Capabilities, Event, Provider, ProviderMock, Request, Response, Turn}
+  alias AgentHarness.{Event, Provider, ProviderMock, Request, Response}
 
   setup :set_mox_global
   setup :verify_on_exit!
@@ -33,7 +33,7 @@ defmodule AgentHarness.SessionFailureTest do
               {:ok, %{scenario: scenario, test_pid: test_pid, sink: sink}, %{}}
           end
 
-        :provider_down_during_turn ->
+        scenario when scenario in [:provider_down_during_turn, :provider_down_then_reject] ->
           runtime = spawn(fn -> Process.sleep(:infinity) end)
 
           {:ok, %{scenario: scenario, test_pid: test_pid, sink: sink, runtime: runtime},
@@ -41,6 +41,10 @@ defmodule AgentHarness.SessionFailureTest do
 
         :finish_then_transport ->
           {:ok, %{scenario: scenario, test_pid: test_pid, sink: sink}, %{}}
+
+        :update_then_fail ->
+          Provider.Sink.session_updated(sink, %{provider_session_id: "half-open"})
+          {:error, :boot_failed}
       end
     end
 
@@ -58,6 +62,15 @@ defmodule AgentHarness.SessionFailureTest do
       Provider.Sink.finish(handle.sink, turn.id, :completed, %{text: "done"})
       Provider.Sink.transport_down(handle.sink, :connection_lost)
       {:ok, turn.id}
+    end
+
+    def start_turn(%{scenario: :provider_down_then_reject} = handle, %Turn{}, _, _) do
+      Process.exit(handle.runtime, :kill)
+      send(handle.test_pid, {:provider_killed_before_rejection, self()})
+
+      receive do
+        :reject_turn -> {:error, :rejected}
+      end
     end
 
     @impl true
@@ -109,6 +122,33 @@ defmodule AgentHarness.SessionFailureTest do
     assert_receive {:race_provider_closed, :transport_during_open}
     refute_receive {:race_provider_closed, :transport_during_open}, 50
     assert AgentHarness.whereis(id) == nil
+  end
+
+  test "an opening session update is discarded when provider open fails" do
+    id = "update-during-open-#{System.unique_integer([:positive])}"
+
+    assert {:error, {:provider_open_failed, :boot_failed}} =
+             AgentHarness.start_session(:race,
+               id: id,
+               provider_module: RaceProvider,
+               provider_options: %{scenario: :update_then_fail, test_pid: self()}
+             )
+
+    assert :not_found = AgentHarness.Store.Memory.fetch_session(AgentHarness.Store.Memory, id)
+
+    expect(ProviderMock, :open_session, fn _config, _sink ->
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    assert {:ok, retry} =
+             AgentHarness.start_session(:race,
+               id: id,
+               provider_module: ProviderMock
+             )
+
+    assert :ok = AgentHarness.stop_session(retry)
   end
 
   test "a normal-exit race is idempotent only for lifecycle cleanup calls" do
@@ -460,6 +500,46 @@ defmodule AgentHarness.SessionFailureTest do
     assert %{status: :unavailable, current_turn: nil} = AgentHarness.status(session)
     assert :ok = AgentHarness.stop_session(session)
     assert_receive {:race_provider_closed, :provider_down_during_turn}
+  end
+
+  test "a definite admission rejection cannot discard deferred provider loss" do
+    assert {:ok, session} =
+             AgentHarness.start_session(:race,
+               provider_module: RaceProvider,
+               provider_options: %{scenario: :provider_down_then_reject, test_pid: self()}
+             )
+
+    assert {:ok, subscription} = AgentHarness.subscribe(session, from: :latest)
+    assert {:ok, turn} = AgentHarness.start_turn(session, "work")
+    assert_receive {:provider_killed_before_rejection, provider_task}
+
+    server = AgentHarness.whereis(session.id)
+
+    assert eventually(fn ->
+             state = :sys.get_state(server)
+             state.provider_monitor == nil and :queue.len(state.deferred_provider_messages) == 1
+           end)
+
+    send(provider_task, :reject_turn)
+
+    assert_receive {:agent_harness, ref,
+                    %Event{
+                      type: :turn_failed,
+                      turn_id: turn_id,
+                      data: %{result: %{reason: :rejected}}
+                    }}
+
+    assert ref == subscription.ref
+    assert turn_id == turn.id
+
+    assert_receive {:agent_harness, ^ref,
+                    %Event{type: :transport_error, data: %{reason: :killed}}}
+
+    assert Process.alive?(server)
+    assert %{status: :unavailable, current_turn: nil} = AgentHarness.status(session)
+    assert {:error, :session_unavailable} = AgentHarness.start_turn(session, "retry")
+    assert :ok = AgentHarness.stop_session(session)
+    assert_receive {:race_provider_closed, :provider_down_then_reject}
   end
 
   test "a deferred terminal event does not discard later transport loss" do

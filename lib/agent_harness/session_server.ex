@@ -66,6 +66,7 @@ defmodule AgentHarness.SessionServer do
       subscriptions: %{},
       monitors: %{},
       deferred_provider_messages: :queue.new(),
+      open_session_attrs: %{},
       seq: 0,
       event_buffer: nil
     ]
@@ -464,14 +465,18 @@ defmodule AgentHarness.SessionServer do
         {:agent_harness_provider, sink_ref, {:session_updated, attrs}},
         %State{sink: %Sink{ref: sink_ref}} = state
       ) do
-    state =
-      case Map.fetch(attrs, :provider_session_id) do
-        {:ok, provider_session_id} -> %{state | provider_session_id: provider_session_id}
-        :error -> state
-      end
+    if state.status == :opening do
+      {:noreply, %{state | open_session_attrs: Map.merge(state.open_session_attrs, attrs)}}
+    else
+      state =
+        case Map.fetch(attrs, :provider_session_id) do
+          {:ok, provider_session_id} -> %{state | provider_session_id: provider_session_id}
+          :error -> state
+        end
 
-    state = persist_session(state)
-    {:noreply, emit(state, nil, :session_updated, attrs)}
+      state = persist_session(state)
+      {:noreply, emit(state, nil, :session_updated, attrs)}
+    end
   end
 
   def handle_info(
@@ -672,12 +677,20 @@ defmodule AgentHarness.SessionServer do
   end
 
   defp initialize_provider_state(state, provider_handle, info) do
+    provider_session_id =
+      Map.get(
+        state.open_session_attrs,
+        :provider_session_id,
+        Map.get(info, :provider_session_id)
+      )
+
     state = %{
       state
       | status: :idle,
         provider_handle: provider_handle,
         provider_monitor: monitor_provider(state.provider, provider_handle, info),
-        provider_session_id: Map.get(info, :provider_session_id)
+        provider_session_id: provider_session_id,
+        open_session_attrs: %{}
     }
 
     try do
@@ -1107,17 +1120,20 @@ defmodule AgentHarness.SessionServer do
     )
   end
 
-  defp finish_turn_start(state, {:error, reason}), do: fail_turn_start(state, reason)
+  defp finish_turn_start(state, {:error, reason}) do
+    state |> fail_turn_start(reason) |> drain_deferred_provider_messages()
+  end
 
   defp finish_turn_start(state, other) do
-    fail_turn_start(state, {:invalid_provider_start_return, other})
+    state
+    |> fail_turn_start({:invalid_provider_start_return, other})
+    |> drain_deferred_provider_messages()
   end
 
   defp fail_turn_start(%State{current_turn: nil} = state, _reason), do: state
 
   defp fail_turn_start(state, reason) do
     turn_id = state.current_turn.id
-    state = %{state | deferred_provider_messages: :queue.new()}
     complete_turn(state, turn_id, :failed, %{reason: reason}, nil)
   end
 

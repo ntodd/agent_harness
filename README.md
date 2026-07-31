@@ -225,13 +225,13 @@ Normal tests use Mox-backed provider clients and do not consume Codex or Claude
 quota:
 
 ```console
-$ mise exec -- mix precommit
+$ mix precommit
 ```
 
 Live CLI tests are tagged and excluded by default:
 
 ```console
-$ mise exec -- mix test --include live
+$ mix test --include live
 ```
 
 Live tests invoke your authenticated CLI and may consume subscription or API

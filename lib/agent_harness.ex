@@ -20,6 +20,7 @@ defmodule AgentHarness do
 
   @session_supervisor AgentHarness.SessionSupervisor
   @terminal_events [:turn_completed, :turn_failed, :turn_cancelled, :turn_interrupted]
+  @call_timeout 30_000
 
   @doc """
   Starts a supervised logical session for `provider`.
@@ -183,10 +184,12 @@ defmodule AgentHarness do
 
       pid ->
         try do
-          GenServer.call(pid, message)
+          GenServer.call(pid, message, @call_timeout)
         catch
           :exit, {:noproc, _details} -> {:error, :session_not_found}
           :exit, {:normal, _details} -> :ok
+          :exit, {:timeout, _details} -> {:error, :session_call_timeout}
+          :exit, reason -> {:error, {:session_call_failed, reason}}
         end
     end
   end

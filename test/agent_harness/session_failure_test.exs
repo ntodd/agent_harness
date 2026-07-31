@@ -41,6 +41,25 @@ defmodule AgentHarness.SessionFailureTest do
     assert :ok = AgentHarness.stop_session(session)
   end
 
+  test "a crashing provider call returns an error instead of exiting the caller" do
+    expect(ProviderMock, :open_session, fn _config, _sink ->
+      {:ok, :provider_handle, %{}}
+    end)
+
+    expect(ProviderMock, :start_turn, fn :provider_handle, _turn, "Crash", [] ->
+      raise "provider callback crashed"
+    end)
+
+    expect(ProviderMock, :close_session, fn :provider_handle -> :ok end)
+
+    {:ok, session} = AgentHarness.start_session(:test, provider_module: ProviderMock)
+
+    assert {:error, {:session_call_failed, _reason}} =
+             AgentHarness.start_turn(session, "Crash")
+
+    assert eventually(fn -> AgentHarness.whereis(session.id) == nil end)
+  end
+
   test "cancellation remains pending until the provider emits a terminal event" do
     test_pid = self()
 
@@ -349,4 +368,17 @@ defmodule AgentHarness.SessionFailureTest do
     assert %{status: :idle, current_turn: nil} = AgentHarness.status(session)
     assert :ok = AgentHarness.stop_session(session)
   end
+
+  defp eventually(fun, attempts \\ 20)
+
+  defp eventually(fun, attempts) when attempts > 0 do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
+    end
+  end
+
+  defp eventually(_fun, 0), do: false
 end

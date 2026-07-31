@@ -72,26 +72,28 @@ defmodule AgentHarness.SessionServer do
     provider = Keyword.fetch!(opts, :provider)
     sink = Sink.new(self())
 
-    with :ok <- ensure_unused_session_id(config.store, session.id) do
-      case provider.open_session(config, sink) do
-        {:ok, provider_handle, info} ->
-          initialize_open_session(
-            session,
-            config,
-            provider,
-            provider_handle,
-            info,
-            sink
-          )
+    case ensure_unused_session_id(config.store, session.id) do
+      :ok ->
+        case provider.open_session(config, sink) do
+          {:ok, provider_handle, info} ->
+            initialize_open_session(
+              session,
+              config,
+              provider,
+              provider_handle,
+              info,
+              sink
+            )
 
-        {:error, reason} ->
-          {:stop, {:provider_open_failed, reason}}
+          {:error, reason} ->
+            {:stop, {:provider_open_failed, reason}}
 
-        other ->
-          {:stop, {:provider_open_failed, {:invalid_return, other}}}
-      end
-    else
-      {:error, reason} -> {:stop, reason}
+          other ->
+            {:stop, {:provider_open_failed, {:invalid_return, other}}}
+        end
+
+      {:error, reason} ->
+        {:stop, reason}
     end
   end
 

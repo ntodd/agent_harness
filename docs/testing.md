@@ -3,28 +3,18 @@
 AgentHarness separates deterministic protocol/lifecycle tests from live CLI
 tests that consume real provider usage.
 
-## Toolchain
-
-The repository pins Erlang, Elixir, and Node with mise. Erlang and Elixir are
-required for the library and its deterministic suite. Node is development
-parity for Node-based CLI and MCP commands; the core Elixir suite does not
-invoke Node:
-
-```console
-$ mise install
-$ mise exec -- elixir --version
-```
+## Test commands
 
 Run the normal suite:
 
 ```console
-$ mise exec -- mix test
+$ mix test
 ```
 
 Run the complete local precommit gate:
 
 ```console
-$ mise exec -- mix precommit
+$ mix precommit
 ```
 
 `precommit` checks formatting, compiles with warnings as errors, runs tests, and
@@ -72,17 +62,17 @@ Live tests use ExUnit's `:live` tag and are excluded in `test/test_helper.exs`.
 They run only when explicitly included:
 
 ```console
-$ mise exec -- mix test --include live
+$ mix test --include live
 ```
 
 To run only one provider's integrations:
 
 ```console
-$ mise exec -- mix test \
+$ mix test \
     test/agent_harness/providers/claude_live_test.exs \
     --include live
 
-$ mise exec -- mix test \
+$ mix test \
     test/agent_harness/providers/codex_live_test.exs \
     --include live
 ```
@@ -130,7 +120,7 @@ status rather than prose beyond a deliberately constrained response.
 For interactive debugging:
 
 ```console
-$ mise exec -- iex -S mix
+$ iex -S mix
 ```
 
 Then:

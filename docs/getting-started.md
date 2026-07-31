@@ -53,21 +53,21 @@ errors during a turn.
 
 ### Common session options
 
-| Option | Purpose |
-| --- | --- |
-| `:id` | Caller-selected logical session ID |
-| `:cwd` | Working directory visible to the coding agent |
-| `:model` | Provider model name |
-| `:system_prompt` | Codex developer instructions or Claude system prompt |
-| `:approval_policy` | Provider-native approval policy; maps to Claude `permission_mode` |
-| `:sandbox` | Provider-native sandbox configuration |
-| `:mcp_servers` | Map of session-scoped MCP servers |
-| `:skills` | Skill paths or descriptors |
-| `:env` | Environment overrides for the provider process |
-| `:provider_options` | Provider-specific escape hatch |
-| `:metadata` | Caller-owned orchestration metadata |
-| `:event_buffer_size` | Positive in-memory replay-buffer size; default `1_000` |
-| `:store` | `{store_module, owner}` or `false` |
+| Option               | Purpose                                                           |
+| -------------------- | ----------------------------------------------------------------- |
+| `:id`                | Caller-selected logical session ID                                |
+| `:cwd`               | Working directory visible to the coding agent                     |
+| `:model`             | Provider model name                                               |
+| `:system_prompt`     | Codex developer instructions or Claude system prompt              |
+| `:approval_policy`   | Provider-native approval policy; maps to Claude `permission_mode` |
+| `:sandbox`           | Provider-native sandbox configuration                             |
+| `:mcp_servers`       | Map of session-scoped MCP servers                                 |
+| `:skills`            | Skill paths or descriptors                                        |
+| `:env`               | Environment overrides for the provider process                    |
+| `:provider_options`  | Provider-specific escape hatch                                    |
+| `:metadata`          | Caller-owned orchestration metadata                               |
+| `:event_buffer_size` | Positive in-memory replay-buffer size; default `1_000`            |
+| `:store`             | `{store_module, owner}` or `false`                                |
 
 Do not put secrets in `:metadata`. The default Store persists metadata as part
 of the session snapshot. Provider environment values are not included in that
@@ -160,10 +160,10 @@ end
 
 The `:from` option controls replay:
 
-| Value | Meaning |
-| --- | --- |
-| `:latest` | Only future events; the default for `subscribe/2` |
-| `:start` | Replay retained events, then continue live |
+| Value                | Meaning                                                   |
+| -------------------- | --------------------------------------------------------- |
+| `:latest`            | Only future events; the default for `subscribe/2`         |
+| `:start`             | Replay retained events, then continue live                |
 | `{:after, sequence}` | Replay events with a greater sequence, then continue live |
 
 Each event has a monotonically increasing `seq` within its session. A

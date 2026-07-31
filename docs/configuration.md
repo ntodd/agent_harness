@@ -321,18 +321,18 @@ look like:
 
 Recognized layers:
 
-| Key | Applied to |
-| --- | --- |
-| `:auth` | `:subscription` (default) or intentional `:inherit` |
-| `:client` | Trusted test/custom Codex client module |
-| `:codex_path` | Executable override |
-| `:codex_options` | `Codex.Options` construction |
-| `:connect_options` | App-server connection/initialization |
-| `:thread_options` | New or resumed Codex thread |
-| `:turn_options` | Every turn in this AgentHarness session |
-| `:provider_session_id` | Resume a specific Codex thread |
-| `:thread_id` | Alias for `:provider_session_id` |
-| `:resume` | Alias for an exact thread ID |
+| Key                    | Applied to                                          |
+| ---------------------- | --------------------------------------------------- |
+| `:auth`                | `:subscription` (default) or intentional `:inherit` |
+| `:client`              | Trusted test/custom Codex client module             |
+| `:codex_path`          | Executable override                                 |
+| `:codex_options`       | `Codex.Options` construction                        |
+| `:connect_options`     | App-server connection/initialization                |
+| `:thread_options`      | New or resumed Codex thread                         |
+| `:turn_options`        | Every turn in this AgentHarness session             |
+| `:provider_session_id` | Resume a specific Codex thread                      |
+| `:thread_id`           | Alias for `:provider_session_id`                    |
+| `:resume`              | Alias for an exact thread ID                        |
 
 String forms of documented option keys are canonicalized without creating
 arbitrary atoms.
@@ -422,13 +422,13 @@ with a bidirectional stream:
 
 AgentHarness consumes these internal keys:
 
-| Key | Meaning |
-| --- | --- |
-| `:auth` | `:subscription` (default) or `:inherit` |
-| `:auth_check_timeout` | Bound for `claude auth status`; default `5_000` ms |
-| `:readiness_timeout` | Time to wait for the CLI initialization handshake; default `10_000` ms |
-| `:question_timeout` | Time to wait for your response; default `:infinity` |
-| `:client` | Trusted test/custom client module |
+| Key                   | Meaning                                                                |
+| --------------------- | ---------------------------------------------------------------------- |
+| `:auth`               | `:subscription` (default) or `:inherit`                                |
+| `:auth_check_timeout` | Bound for `claude auth status`; default `5_000` ms                     |
+| `:readiness_timeout`  | Time to wait for the CLI initialization handshake; default `10_000` ms |
+| `:question_timeout`   | Time to wait for your response; default `:infinity`                    |
+| `:client`             | Trusted test/custom client module                                      |
 
 Other provider options are passed to `ClaudeCode.start_link/1` after common
 fields are mapped, except that subscription mode rejects or replaces
@@ -519,21 +519,21 @@ recreate a stopped session from Store.
 
 ## Provider differences
 
-| Concern | Codex | Claude |
-| --- | --- | --- |
-| Transport | Codex app-server via `codex_sdk` | Bidirectional Claude CLI via `claude_code` |
-| Turn input | String or structured input list | String |
-| Token deltas | Native | Native |
-| Questions | Native app-server request | Native `can_use_tool` callback |
-| Approvals | Command, file, permissions, MCP elicitation | Tool permission callback |
-| Session-scoped approval | Advertised for file/permission protocols; command requests follow `availableDecisions` | Explicitly unsupported; returns an error |
-| Skills | Explicit native skill input | Session plugin generated when needed |
-| Cancellation | Turn interrupt, then drain the authoritative terminal event | CLI interrupt |
-| Resume | Codex thread ID | Claude session ID |
-| Fork | Unsupported in the current adapter | Native via `resume` plus `fork_session` |
-| Approval/sandbox config | Common session fields | Common fields with Claude-native values |
-| Steering | Capability currently unsupported | Capability currently unsupported |
-| Terminal signal | Codex terminal turn event | Claude `ResultMessage` |
+| Concern                 | Codex                                                                                  | Claude                                     |
+| ----------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------ |
+| Transport               | Codex app-server via `codex_sdk`                                                       | Bidirectional Claude CLI via `claude_code` |
+| Turn input              | String or structured input list                                                        | String                                     |
+| Token deltas            | Native                                                                                 | Native                                     |
+| Questions               | Native app-server request                                                              | Native `can_use_tool` callback             |
+| Approvals               | Command, file, permissions, MCP elicitation                                            | Tool permission callback                   |
+| Session-scoped approval | Advertised for file/permission protocols; command requests follow `availableDecisions` | Explicitly unsupported; returns an error   |
+| Skills                  | Explicit native skill input                                                            | Session plugin generated when needed       |
+| Cancellation            | Turn interrupt, then drain the authoritative terminal event                            | CLI interrupt                              |
+| Resume                  | Codex thread ID                                                                        | Claude session ID                          |
+| Fork                    | Unsupported in the current adapter                                                     | Native via `resume` plus `fork_session`    |
+| Approval/sandbox config | Common session fields                                                                  | Common fields with Claude-native values    |
+| Steering                | Capability currently unsupported                                                       | Capability currently unsupported           |
+| Terminal signal         | Codex terminal turn event                                                              | Claude `ResultMessage`                     |
 
 Provider-specific event data remains available in `Event.raw`. Write your
 orchestrator against normalized lifecycle and request events, then inspect

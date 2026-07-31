@@ -75,21 +75,21 @@ output, commands, file paths, tool input, or other sensitive data.
 
 The SessionServer itself emits:
 
-| Type | Meaning |
-| --- | --- |
-| `:session_ready` | Provider runtime opened successfully |
-| `:session_updated` | Provider identity or other session metadata changed |
-| `:turn_started` | Adapter accepted the turn locally; upstream work may start lazily |
-| `:request_created` | Provider needs a question or permission response |
-| `:request_resolved` | AgentHarness accepted one response |
-| `:request_expired` | Request expired at turn end, provider resolution, or timeout |
-| `:cancel_requested` | Adapter accepted or scheduled cancellation locally |
-| `:turn_completed` | Authoritative successful terminal event |
-| `:turn_failed` | Authoritative or synthesized failure |
-| `:turn_cancelled` | Provider reported cancellation |
-| `:turn_interrupted` | Provider reported interruption |
-| `:transport_error` | Provider transport became unavailable |
-| `:session_closed` | AgentHarness closed the logical session |
+| Type                | Meaning                                                           |
+| ------------------- | ----------------------------------------------------------------- |
+| `:session_ready`    | Provider runtime opened successfully                              |
+| `:session_updated`  | Provider identity or other session metadata changed               |
+| `:turn_started`     | Adapter accepted the turn locally; upstream work may start lazily |
+| `:request_created`  | Provider needs a question or permission response                  |
+| `:request_resolved` | AgentHarness accepted one response                                |
+| `:request_expired`  | Request expired at turn end, provider resolution, or timeout      |
+| `:cancel_requested` | Adapter accepted or scheduled cancellation locally                |
+| `:turn_completed`   | Authoritative successful terminal event                           |
+| `:turn_failed`      | Authoritative or synthesized failure                              |
+| `:turn_cancelled`   | Provider reported cancellation                                    |
+| `:turn_interrupted` | Provider reported interruption                                    |
+| `:transport_error`  | Provider transport became unavailable                             |
+| `:session_closed`   | AgentHarness closed the logical session                           |
 
 Only the four `:turn_*` terminal types end `stream/2` and `await/2`.
 

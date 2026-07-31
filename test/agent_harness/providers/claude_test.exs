@@ -720,6 +720,32 @@ defmodule AgentHarness.Providers.ClaudeTest do
     refute File.exists?(generated_plugin)
   end
 
+  test "transfers generated skill plugin cleanup to the live provider", %{
+    client_session: client_session
+  } do
+    test_pid = self()
+    source = skill_fixture!()
+
+    expect(ClientMock, :start_link, fn opts ->
+      [generated_plugin] = opts[:plugins]
+      send(test_pid, {:generated_plugin, generated_plugin})
+      {:ok, client_session}
+    end)
+
+    expect(ClientMock, :session_id, fn ^client_session -> nil end)
+    expect(ClientMock, :stop, fn ^client_session -> :ok end)
+
+    config =
+      config(skills: [%{name: "test-skill", path: Path.join(source, "SKILL.md")}])
+
+    assert {:ok, handle, _info} = Claude.open_session(config, Sink.new(self()))
+    assert_receive {:generated_plugin, generated_plugin}
+    assert File.exists?(generated_plugin)
+
+    assert :ok = Claude.close_session(handle)
+    refute File.exists?(generated_plugin)
+  end
+
   defp config(opts \\ []) do
     base = %SessionConfig{
       session_id: "session-1",

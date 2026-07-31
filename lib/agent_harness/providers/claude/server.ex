@@ -115,14 +115,7 @@ defmodule AgentHarness.Providers.Claude.Server do
   def handle_continue(:open, {:opening, config, sink, guardian} = opening) do
     case Options.prepare(config) do
       {:ok, prepared} ->
-        case start_client(config, sink, prepared) do
-          {:ok, state} ->
-            OpenGuardian.disarm(guardian)
-            {:noreply, state}
-
-          {:stop, reason} ->
-            {:stop, reason, opening}
-        end
+        continue_guarded_open(config, sink, prepared, guardian, opening)
 
       {:error, reason} ->
         {:stop, {:invalid_claude_options, reason}, opening}
@@ -370,6 +363,28 @@ defmodule AgentHarness.Providers.Claude.Server do
   end
 
   def terminate(_reason, {:opening, _config, _sink, _guardian}), do: :ok
+
+  defp continue_guarded_open(config, sink, prepared, guardian, opening) do
+    case OpenGuardian.protect_paths(guardian, prepared.cleanup_paths) do
+      :ok ->
+        finish_guarded_open(config, sink, prepared, guardian, opening)
+
+      {:error, :guardian_down} ->
+        cleanup(prepared.cleanup_paths)
+        {:stop, {:claude_start_failed, :startup_owner_down}, opening}
+    end
+  end
+
+  defp finish_guarded_open(config, sink, prepared, guardian, opening) do
+    case start_client(config, sink, prepared) do
+      {:ok, state} ->
+        OpenGuardian.disarm(guardian)
+        {:noreply, state}
+
+      {:stop, reason} ->
+        {:stop, reason, opening}
+    end
+  end
 
   defp start_client(config, sink, prepared) do
     server = self()

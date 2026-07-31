@@ -38,6 +38,12 @@ defmodule AgentHarness.ProviderOpenGuardianTest do
     @impl true
     def start_link(options) do
       test_pid = Keyword.fetch!(options, :guardian_test_pid)
+
+      case Keyword.get(options, :plugins, []) do
+        [generated_plugin] -> send(test_pid, {:generated_plugin, generated_plugin})
+        _plugins -> :ok
+      end
+
       Agent.start_link(fn -> test_pid end)
     end
 
@@ -123,6 +129,30 @@ defmodule AgentHarness.ProviderOpenGuardianTest do
     refute runtime in provider_children()
   end
 
+  test "Claude generated skill plugins are removed when the guarded startup is killed" do
+    session_id = unique_id("claude-guardian-skill")
+    skill = skill_fixture!()
+
+    assert {:error, :session_start_timeout} =
+             AgentHarness.start_session(:claude,
+               id: session_id,
+               startup_timeout: 50,
+               skills: [skill],
+               provider_options: %{
+                 auth: :inherit,
+                 client: NeverReadyClaudeClient,
+                 guardian_test_pid: self()
+               }
+             )
+
+    assert_receive {:generated_plugin, generated_plugin}
+    assert_receive {:claude_handshake_blocked, runtime, client_session}
+    cleanup_on_exit([runtime, client_session])
+
+    assert_process_stops(runtime)
+    refute_eventually_exists(generated_plugin)
+  end
+
   test "guardian requests graceful provider termination before forcing it" do
     owner = spawn(fn -> Process.sleep(:infinity) end)
 
@@ -193,6 +223,32 @@ defmodule AgentHarness.ProviderOpenGuardianTest do
     AgentHarness.ProviderSupervisor
     |> DynamicSupervisor.which_children()
     |> Enum.map(&elem(&1, 1))
+  end
+
+  defp skill_fixture! do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "agent-harness-guardian-skill-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(path)
+    File.write!(Path.join(path, "SKILL.md"), "# Guardian cleanup test\n")
+    on_exit(fn -> File.rm_rf!(path) end)
+    path
+  end
+
+  defp refute_eventually_exists(path, attempts \\ 20)
+
+  defp refute_eventually_exists(path, 0), do: refute(File.exists?(path))
+
+  defp refute_eventually_exists(path, attempts) do
+    if File.exists?(path) do
+      Process.sleep(25)
+      refute_eventually_exists(path, attempts - 1)
+    else
+      :ok
+    end
   end
 
   defp unique_id(prefix), do: "#{prefix}-#{System.unique_integer([:positive])}"

@@ -70,7 +70,7 @@ defmodule AgentHarness.StreamTest do
       {:ok, :provider_handle, %{}}
     end)
 
-    expect(ProviderMock, :start_turn, fn :provider_handle, _turn, "Crash", [] ->
+    stub(ProviderMock, :start_turn, fn :provider_handle, _turn, "Crash", [] ->
       {:ok, "provider-turn-1"}
     end)
 
@@ -102,7 +102,7 @@ defmodule AgentHarness.StreamTest do
       {:ok, :provider_handle, %{}}
     end)
 
-    expect(ProviderMock, :start_turn, fn :provider_handle, _turn, "Crash stream", [] ->
+    stub(ProviderMock, :start_turn, fn :provider_handle, _turn, "Crash stream", [] ->
       {:ok, "provider-turn-1"}
     end)
 

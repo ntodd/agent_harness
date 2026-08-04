@@ -1,0 +1,6 @@
+{"type":"bash_execution_update","id":"b1","delta":"hello-from-pi\n/private/tmp/pi-probe/proj\n"}
+{"id":"b1","type":"response","command":"bash","success":true,"data":{"output":"hello-from-pi\n/private/tmp/pi-probe/proj\n","exitCode":0,"cancelled":false,"truncated":false}}
+{"id":"x1","type":"response","command":"nonsense_command","success":false,"error":"Unknown command: nonsense_command"}
+{"type":"response","command":"parse","success":false,"error":"Failed to parse command: Unexpected token 'o', \"not json at all\" is not valid JSON"}
+{"id":"a1","type":"response","command":"abort","success":true}
+{"id":"s1","type":"response","command":"get_session_stats","success":true,"data":{"sessionFile":"/tmp/pi-probe/home/sessions/--private-tmp-pi-probe-proj--/2026-08-04T02-37-35-709Z_019fcaa2-345d-7d0d-be42-d5fcf0532365.jsonl","sessionId":"019fcaa2-345d-7d0d-be42-d5fcf0532365","userMessages":0,"assistantMessages":0,"toolCalls":0,"toolResults":0,"totalMessages":1,"tokens":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0},"cost":0}}

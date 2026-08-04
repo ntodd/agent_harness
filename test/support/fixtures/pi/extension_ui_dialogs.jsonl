@@ -1,0 +1,11 @@
+{"type":"extension_ui_request","id":"604215e0-be87-4ceb-b954-8fc3795d628c","method":"notify","message":"mode=rpc hasUI=true cwd=/private/tmp/pi-probe/proj","notifyType":"info"}
+{"id":"m1","type":"response","command":"prompt","success":true}
+{"type":"extension_ui_request","id":"ada9d8e0-8aff-45bb-9937-82d1b9d8dd48","method":"confirm","title":"Run dangerous command?","message":"rm -rf /tmp/x"}
+{"type":"extension_ui_request","id":"5a1ea5a4-b893-484e-a6f3-762f9f5e670c","method":"notify","message":"confirm resolved: true","notifyType":"info"}
+{"id":"u1","type":"response","command":"prompt","success":true}
+{"type":"extension_ui_request","id":"bcacc17e-9563-4c37-839a-73e33a97d844","method":"select","title":"Which database?","options":["Postgres","SQLite","MySQL"]}
+{"type":"extension_ui_request","id":"ba5e2e30-087d-464a-b442-d4e43c6862a8","method":"notify","message":"select resolved: \"Postgres\"","notifyType":"info"}
+{"id":"u2","type":"response","command":"prompt","success":true}
+{"type":"extension_ui_request","id":"5226ee3b-49bc-49f8-9851-ab38c34ab820","method":"input","title":"Project name?","placeholder":"my-app"}
+{"type":"extension_ui_request","id":"729fc5cb-8baf-4263-975b-fe0515585785","method":"notify","message":"input resolved: \"probe-value\"","notifyType":"info"}
+{"id":"u3","type":"response","command":"prompt","success":true}

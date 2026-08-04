@@ -9,7 +9,7 @@ published a stable public API.
 
 ### Added
 
-- Supervised Codex CLI and Claude Code session adapters.
+- Supervised Codex CLI, Claude Code, and Pi session adapters.
 - Ordered session and turn event subscriptions, replay, streams, and await.
 - Structured questions, approvals, MCP elicitation, cancellation, and terminal
   outcomes.

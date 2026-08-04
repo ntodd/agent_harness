@@ -75,6 +75,10 @@ $ mix test \
 $ mix test \
     test/agent_harness/providers/codex_live_test.exs \
     --include live
+
+$ mix test \
+    test/agent_harness/providers/pi_live_test.exs \
+    --include live
 ```
 
 Before running it:
@@ -102,6 +106,28 @@ $ codex login
 They open the real app-server and run a read-only ephemeral turn in a temporary
 directory. The turn still invokes a real model and consumes your available
 Codex usage.
+
+Run the Pi tests only after installing the CLI, which needs Node 22.19 or
+newer:
+
+```console
+$ npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+$ pi --version
+```
+
+Pi is bring-your-own-model, so the live tests run with `auth: :inherit` and
+whichever API key is already exported. They default to `openai/gpt-4.1-nano`;
+override with `PI_LIVE_MODEL`. Each test sets `agent_dir` to a temporary
+directory, which points `PI_CODING_AGENT_DIR` away from your real `~/.pi`, so
+live runs never read or write your own pi config, credentials, or sessions.
+They cover session opening, a completed turn, token streaming, a real `read`
+tool call, cancellation, resume from a persisted session file, and the two
+rejection paths for features pi does not have.
+
+Pi writes an `EPIPE` stack trace to stderr when the harness closes its port
+mid-write. It is noise on teardown: pi appends session entries as they happen,
+so the transcript on disk is complete, which the resume test exercises
+directly.
 
 Live tests should always:
 
@@ -164,6 +190,20 @@ working directory. Then inspect:
 - MCP child command paths;
 - skill/plugin paths;
 - configured model and provider option compatibility.
+
+### Recorded protocol fixtures
+
+`test/support/fixtures/pi` holds JSONL frames captured verbatim from a real
+`pi --mode rpc` process. The normalizer and session tests replay them, so those
+assertions track what pi actually emits rather than what its documentation
+describes. Several adapter decisions came from differences between the two:
+readiness needs a `get_state` probe because pi sends no startup frame,
+`agent_settled` rather than `agent_end` is the terminal marker, and an `abort`
+acknowledgement arrives after the run has already settled.
+
+To refresh a fixture, run the corresponding scenario against a real pi process
+and save its stdout. Only `message_update` frames should be decimated; every
+lifecycle and control frame belongs in the file.
 
 ## Adding provider tests
 

@@ -1,14 +1,14 @@
 # AgentHarness
 
 AgentHarness is an Elixir library for running locally installed coding agents
-as supervised OTP sessions. It currently supports Codex CLI and Claude Code,
-normalizes their streaming output, and gives callers one interface for turns,
-questions, approvals, cancellation, completion, and event replay.
+as supervised OTP sessions. It currently supports Codex CLI, Claude Code, and
+Pi, normalizes their streaming output, and gives callers one interface for
+turns, questions, approvals, cancellation, completion, and event replay.
 
 AgentHarness is deliberately **bring your own CLI**. It does not proxy
-credentials, create API keys, or log in on your behalf. The Codex and Claude
-processes run on your machine with the accounts already configured in their
-official CLIs.
+credentials, create API keys, or log in on your behalf. The provider processes
+run on your machine with the accounts already configured in their official
+CLIs.
 
 > AgentHarness is an early v0.1 library. Its core lifecycle is tested, but the
 > public API and provider event vocabulary may still evolve.
@@ -16,7 +16,7 @@ official CLIs.
 ## What it provides
 
 - One supervised `GenServer` per logical agent session
-- Codex app-server and Claude Code streaming adapters
+- Codex app-server, Claude Code, and Pi RPC streaming adapters
 - Ordered `%AgentHarness.Event{}` values with normalized data and raw SDK payloads
 - Session- or turn-scoped subscriptions
 - Replay-capable Elixir streams and race-free terminal `await/2`
@@ -51,8 +51,18 @@ $ claude --version
 $ claude
 ```
 
-By default, AgentHarness requires the CLIs' saved ChatGPT or claude.ai login and
-rejects known API, cloud-provider, and custom-routing overrides. To
+Pi is optional and only needed for `:pi` sessions. It is an npm package that
+requires Node 22.19 or newer:
+
+```console
+$ npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+$ pi --version
+$ pi          # then /login to authenticate a provider
+```
+
+By default, AgentHarness requires the CLIs' saved subscription login (ChatGPT,
+claude.ai, or a pi `/login` provider) and rejects known API, cloud-provider, and
+custom-routing overrides. To
 intentionally use another authentication route, set
 `provider_options: %{auth: :inherit}`. See
 [Billing and authentication](docs/billing-and-authentication.md) for the
@@ -181,7 +191,8 @@ their turn ends.
 
 ## Per-session MCP and skills
 
-Both providers accept session-scoped MCP configuration:
+Codex and Claude accept session-scoped MCP configuration. Pi has no MCP
+support and rejects a session that configures it:
 
 ```elixir
 mcp_servers = %{
@@ -224,7 +235,7 @@ with each turn. Details and provider-specific options are in
 
 ## Development
 
-Normal tests use Mox-backed provider clients and do not consume Codex or Claude
+Normal tests use Mox-backed provider clients and do not consume provider
 quota:
 
 ```console

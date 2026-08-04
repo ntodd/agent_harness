@@ -682,6 +682,7 @@ defmodule AgentHarness do
         case provider do
           :codex -> AgentHarness.Providers.Codex
           :claude -> AgentHarness.Providers.Claude
+          :pi -> AgentHarness.Providers.Pi
           other -> other
         end
       end)

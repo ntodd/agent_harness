@@ -1,8 +1,8 @@
 # Billing and authentication
 
-AgentHarness is bring-your-own-CLI infrastructure. It launches the Codex and
-Claude Code executables already installed on your machine and relies on their
-saved authentication. It does not proxy credentials, convert a subscription
+AgentHarness is bring-your-own-CLI infrastructure. It launches the Codex,
+Claude Code, and Pi executables already installed on your machine and relies on
+their saved authentication. It does not proxy credentials, convert a subscription
 into an API key, or bypass provider usage limits.
 
 ## Can this use subscription access?
@@ -17,6 +17,13 @@ As of July 31, 2026, the providers' official guidance says:
   Claude Code share plan limits, and API-credit usage is a separate billing
   route. Check [Claude Code setup](https://docs.anthropic.com/en/docs/claude-code/getting-started)
   and [Using Claude Code with your Pro or Max plan](https://support.anthropic.com/en/articles/11145838-using-claude-code-with-your-pro-or-max-plan).
+- Pi is bring-your-own-model and not tied to one vendor. Its `/login` flow
+  stores OAuth credentials for subscription providers, including Claude Pro and
+  Max, ChatGPT Plus and Pro, and GitHub Copilot. Whether a given subscription
+  permits use through a third-party harness is that provider's decision, so
+  check the same pages above plus
+  [GitHub Copilot's terms](https://docs.github.com/en/copilot/responsible-use-of-github-copilot-features)
+  before relying on it.
 
 That means a personal, local AgentHarness process can use the same CLI login
 that works when you run the CLI yourself, without requiring AgentHarness to
@@ -29,7 +36,7 @@ of truth.
 
 ## Authentication modes
 
-Both built-in adapters default to:
+All three built-in adapters default to:
 
 ```elixir
 provider_options: %{auth: :subscription}
@@ -48,6 +55,15 @@ provider_options: %{auth: :inherit}
 `:inherit` permits the CLI/SDK to use API credentials, cloud providers, custom
 endpoints, or managed environment configuration. Any resulting charges follow
 that provider's normal terms.
+
+Pi enforces the same policy differently, because it is bring-your-own-model
+rather than tied to one account. Under `:subscription` the adapter rejects an
+explicit `api_key`, refuses session `env` entries that look like credentials
+(anything ending in `_API_KEY`, plus the cloud and bearer-token variables pi
+documents), and confirms with `pi auth print-bearer-token` that the selected
+provider actually holds an OAuth credential. That command prints the token on
+stdout, so the adapter inspects only its exit status and error marker and never
+returns or logs the output.
 
 ## Trust boundary
 

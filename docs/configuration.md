@@ -566,23 +566,92 @@ is independent of `await/2` and stream timeouts.
 AgentHarness records updated Claude session IDs, but v0.1 does not automatically
 recreate a stopped session from Store.
 
+## Pi options
+
+Pi is driven through `pi --mode rpc`. It is the smallest of the supported
+harnesses: four core tools, no permission system, and no MCP. A session that
+sets `mcp_servers`, `approval_policy`, or `sandbox` is rejected at
+`start_session/2` rather than opened with those settings quietly dropped.
+
+```elixir
+{:ok, session} =
+  AgentHarness.start_session(:pi,
+    cwd: "/absolute/path/to/project",
+    model: "anthropic/claude-sonnet-5",
+    provider_options: %{
+      tools: ["read", "grep", "find", "ls"],
+      thinking: "medium",
+      agent_dir: "/absolute/path/to/isolated/pi-home"
+    }
+  )
+```
+
+| Option           | Meaning                                                            |
+| ---------------- | ------------------------------------------------------------------ |
+| `auth`           | `:subscription` (default) or `:inherit`                            |
+| `api_key`        | Explicit key; only valid with `auth: :inherit`                     |
+| `provider`       | Pi provider name when the model pattern does not carry one         |
+| `executable`     | Path or name of the `pi` binary                                    |
+| `tools`          | Allowlist of tool names                                            |
+| `exclude_tools`  | Denylist of tool names                                             |
+| `no_tools`       | Disable all tools                                                  |
+| `thinking`       | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`       |
+| `extensions`     | Extension file paths to load                                       |
+| `resume`         | Session file path or partial session ID to continue                |
+| `fork`           | Session file path or partial session ID to branch from             |
+| `session`        | `false` for an ephemeral run that is never written to disk         |
+| `session_dir`    | Directory for session storage and lookup                           |
+| `agent_dir`      | Sets `PI_CODING_AGENT_DIR`, isolating config and sessions          |
+| `name`           | Session display name                                               |
+| `offline`        | Skip pi's startup network calls                                    |
+
+By default the harness assigns its own session id with `--session-id`, so
+`provider_session_id` matches the AgentHarness session id. Setting `resume`,
+`fork`, or `session: false` hands that choice back to pi, and the id is read
+from pi instead.
+
+### Questions from Pi
+
+Pi has no built-in question tool. Dialogs reach the harness through pi's
+extension UI sub-protocol, so they appear only when a loaded extension calls
+`ctx.ui.confirm`, `ctx.ui.select`, `ctx.ui.input`, or `ctx.ui.editor`. Each one
+arrives as a `%Request{kind: :question}`:
+
+- `confirm` carries `true`/`false` choices. Answer with `Response.approve/0`,
+  `Response.deny/0`, or `Response.answer(boolean)`.
+- `select` carries the extension's options as choices.
+- `input` and `editor` are free-form; answer with `Response.answer(text)`.
+
+`Response.cancel/0` dismisses any dialog. A dialog raised while no turn is
+active is dismissed automatically, because an unanswered dialog blocks pi
+indefinitely.
+
+### Steering
+
+Pi can accept messages while a turn is running, through its `steer` and
+`follow_up` commands. AgentHarness allows one active turn per session and has
+no steering entry point, so the adapter reports `steer: :unsupported` and
+`start_turn/3` during a running turn returns `{:error, {:turn_in_progress, turn}}`.
+The protocol support is in place for when a public API lands.
+
 ## Provider differences
 
-| Concern                 | Codex                                                                                  | Claude                                     |
-| ----------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------ |
-| Transport               | Codex app-server via `codex_sdk`                                                       | Bidirectional Claude CLI via `claude_code` |
-| Turn input              | String or structured input list                                                        | String                                     |
-| Token deltas            | Native                                                                                 | Native                                     |
-| Questions               | Native app-server request                                                              | Native `can_use_tool` callback             |
-| Approvals               | Command, file, permissions, MCP elicitation                                            | Tool permission callback                   |
-| Session-scoped approval | Advertised for file/permission protocols; command requests follow `availableDecisions` | Explicitly unsupported; returns an error   |
-| Skills                  | Explicit native skill input                                                            | Session plugin generated when needed       |
-| Cancellation            | Turn interrupt, then drain the authoritative terminal event                            | CLI interrupt                              |
-| Resume                  | Codex thread ID                                                                        | Claude session ID                          |
-| Fork                    | Unsupported in the current adapter                                                     | Native via `resume` plus `fork_session`    |
-| Approval/sandbox config | Common session fields                                                                  | Common fields with Claude-native values    |
-| Steering                | Capability currently unsupported                                                       | Capability currently unsupported           |
-| Terminal signal         | Codex terminal turn event                                                              | Claude `ResultMessage`                     |
+| Concern                 | Codex                                                                                  | Claude                                     | Pi                                            |
+| ----------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------ | --------------------------------------------- |
+| Transport               | Codex app-server via `codex_sdk`                                                       | Bidirectional Claude CLI via `claude_code` | `pi --mode rpc` JSONL over a port             |
+| Turn input              | String or structured input list                                                        | String                                     | String, or a list of strings joined by newline |
+| Token deltas            | Native                                                                                 | Native                                     | Native                                        |
+| Questions               | Native app-server request                                                              | Native `can_use_tool` callback             | Extension UI dialogs, only when an extension asks |
+| Approvals               | Command, file, permissions, MCP elicitation                                            | Tool permission callback                   | Unsupported; pi has no permission system      |
+| Session-scoped approval | Advertised for file/permission protocols; command requests follow `availableDecisions` | Explicitly unsupported; returns an error   | Not applicable                                |
+| Per-session MCP         | Native                                                                                 | Native                                     | Unsupported; a configured server is rejected  |
+| Skills                  | Explicit native skill input                                                            | Session plugin generated when needed       | Native `--skill` per skill path               |
+| Cancellation            | Turn interrupt, then drain the authoritative terminal event                            | CLI interrupt                              | `abort`, then the aborted stop reason         |
+| Resume                  | Codex thread ID                                                                        | Claude session ID                          | Session file path or partial session ID       |
+| Fork                    | Unsupported in the current adapter                                                     | Native via `resume` plus `fork_session`    | Native via `fork`                             |
+| Approval/sandbox config | Common session fields                                                                  | Common fields with Claude-native values    | Rejected; pi does not sandbox                 |
+| Steering                | Capability currently unsupported                                                       | Capability currently unsupported           | Supported by pi, not yet exposed by the harness |
+| Terminal signal         | Codex terminal turn event                                                              | Claude `ResultMessage`                     | `agent_settled`, not `agent_end`              |
 
 Provider-specific event data remains available in `Event.raw`. Write your
 orchestrator against normalized lifecycle and request events, then inspect

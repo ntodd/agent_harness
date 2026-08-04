@@ -429,7 +429,7 @@ To create a new AgentHarness process around an existing Codex thread:
 `:last` is deliberately rejected. In the SDK's app-server transport it does
 not identify an exact thread and can silently start a new one. Resolve and
 persist the concrete Codex thread ID instead. AgentHarness does not
-automatically reconstruct stopped sessions from Store in v0.1.
+automatically reconstruct stopped sessions from Store in v0.x.
 
 ### Codex structured input
 
@@ -563,7 +563,7 @@ is independent of `await/2` and stream timeouts.
   )
 ```
 
-AgentHarness records updated Claude session IDs, but v0.1 does not automatically
+AgentHarness records updated Claude session IDs, but v0.x does not automatically
 recreate a stopped session from Store.
 
 ## Pi options

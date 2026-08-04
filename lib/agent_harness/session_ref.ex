@@ -4,7 +4,7 @@ defmodule AgentHarness.SessionRef do
 
   References deliberately contain no process identifier, keeping callers
   decoupled from process ownership and leaving room for restart or passivation
-  without changing the handle shape. AgentHarness v0.1 does not automatically
+  without changing the handle shape. AgentHarness v0.x does not automatically
   restart, rehydrate, or passivate sessions.
   """
 

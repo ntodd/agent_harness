@@ -360,5 +360,5 @@ the old SessionServer state.
 
 Use deterministic session IDs derived from work ownership when that helps a
 coordinator find duplicates after restart. Do not start the same deterministic
-ID independently on multiple BEAM nodes; v0.1 inventory and Registry ownership
+ID independently on multiple BEAM nodes; v0.x inventory and Registry ownership
 are node-local.

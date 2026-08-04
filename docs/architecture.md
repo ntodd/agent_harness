@@ -41,7 +41,7 @@ The dependency order is also the shutdown order in reverse: SessionServers
 close and checkpoint before provider and task infrastructure is removed.
 
 Session and provider children are currently temporary. Supervision supplies
-ownership, isolation, shutdown, and cleanup, but v0.1 does not automatically
+ownership, isolation, shutdown, and cleanup, but v0.x does not automatically
 restart and rehydrate a crashed coding session.
 
 ## One session, one conversation
@@ -138,7 +138,7 @@ startup task when the orchestrator itself must stay responsive.
 
 ## Logical sessions versus resident CLIs
 
-In the current v0.1 implementation, `start_session/2` opens the provider runtime
+In the current v0.x implementation, `start_session/2` opens the provider runtime
 immediately. Creating 1,000 sessions can therefore create a very large number
 of resident CLI/app-server processes even if they have no active turn.
 
@@ -157,7 +157,7 @@ For large orchestration workloads today:
 - monitor OS resources and provider rate-limit events.
 
 Future passivation or admission-control components can be added without
-changing public SessionRef/Turn IDs, but they are not part of v0.1.
+changing public SessionRef/Turn IDs, but they are not part of v0.x.
 
 The default Memory Store is another large-fleet limit. It serializes all Store
 operations through one process and keeps full event history until an aggregate
@@ -287,7 +287,7 @@ AgentHarness event and request fields.
 ## Single-node scope
 
 The built-in Registry, supervisors, and Memory Store are node-local. Stable IDs
-make a future distributed router possible, but v0.1 does not provide:
+make a future distributed router possible, but v0.x does not provide:
 
 - distributed Registry ownership;
 - cluster-wide capacity leases;

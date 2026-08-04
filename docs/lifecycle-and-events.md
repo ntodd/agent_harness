@@ -311,7 +311,7 @@ event is unavailable returns `{:error, :replay_unavailable}` instead of
 installing a subscription that can never finish. That terminal check does not
 prove every earlier nonterminal delta is still present in the bounded fallback.
 
-There is no demand protocol between a subscriber and SessionServer in v0.1.
+There is no demand protocol between a subscriber and SessionServer in v0.x.
 The provider reader is never intentionally paused because a subscriber is slow.
 If token-level streams feed a slower destination, put a buffering/coalescing
 consumer between AgentHarness and that destination.
@@ -433,7 +433,7 @@ It does not store the full environment, MCP configuration, skills, or provider
 options. The fingerprint can detect configuration drift without making those
 values restorable.
 
-AgentHarness v0.1 does not automatically recreate a stopped SessionServer from
+AgentHarness v0.x does not automatically recreate a stopped SessionServer from
 this snapshot. Resume a provider conversation by starting a new session and
 passing the saved provider session/thread ID as documented in
 [Provider configuration](configuration.md).

@@ -10,7 +10,7 @@ credentials, create API keys, or log in on your behalf. The provider processes
 run on your machine with the accounts already configured in their official
 CLIs.
 
-> AgentHarness is an early v0.1 library. Its core lifecycle is tested, but the
+> AgentHarness is an early v0.x library. Its core lifecycle is tested, but the
 > public API and provider event vocabulary may still evolve.
 
 ## What it provides
@@ -75,7 +75,7 @@ Add AgentHarness to your dependencies:
 ```elixir
 def deps do
   [
-    {:agent_harness, "~> 0.1.0"}
+    {:agent_harness, "~> 0.2.0"}
   ]
 end
 ```

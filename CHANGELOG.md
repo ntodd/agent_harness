@@ -7,9 +7,33 @@ published a stable public API.
 
 ## Unreleased
 
+## 0.2.0 - 2026-08-04
+
 ### Added
 
-- Supervised Codex CLI, Claude Code, and Pi session adapters.
+- Pi session adapter for `pi --mode rpc`, speaking pi's JSONL command and event
+  protocol over stdio.
+- Pi provider options for tool allow and deny lists, thinking level,
+  extensions, resume, fork, ephemeral sessions, session storage, and
+  `agent_dir` isolation.
+- Questions from Pi, raised through its extension UI sub-protocol as `confirm`,
+  `select`, `input`, and `editor` dialogs.
+- Native Pi skills through `--skill`.
+- Subscription auth for Pi, which rejects credential-shaped session `env`
+  entries and confirms the selected provider holds an OAuth credential without
+  reading the token.
+- Pi capability reporting for `approvals`, `per_session_mcp`, and `steer`, all
+  unsupported. A session that sets `mcp_servers`, `approval_policy`, or
+  `sandbox` is rejected at `start_session/2` instead of opened with those
+  settings dropped.
+- Recorded `pi --mode rpc` fixtures that the normalizer and session tests
+  replay, and live tests behind the `live` tag.
+
+## 0.1.0 - 2026-07-31
+
+### Added
+
+- Supervised Codex CLI and Claude Code session adapters.
 - Ordered session and turn event subscriptions, replay, streams, and await.
 - Structured questions, approvals, MCP elicitation, cancellation, and terminal
   outcomes.

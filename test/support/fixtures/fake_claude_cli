@@ -1,0 +1,148 @@
+#!/usr/bin/env elixir
+# Minimal stand-in for the Claude Code CLI. Speaks just enough of the
+# stream-json + control protocol for exec adapter integration tests:
+# answers the initialize handshake, replies to one user message with an
+# init/assistant/result sequence, and (when FAKE_CLI_ASK=1) raises a
+# can_use_tool control request first and waits for the decision.
+
+defmodule FakeClaudeCLI do
+  @session_id "fake-cli-session"
+
+  def loop(state \\ %{pending_tool_request: nil}) do
+    case IO.read(:stdio, :line) do
+      :eof ->
+        :ok
+
+      {:error, _reason} ->
+        :ok
+
+      line ->
+        state = line |> String.trim() |> handle(state)
+        loop(state)
+    end
+  end
+
+  defp handle("", state), do: state
+
+  defp handle(json, state) do
+    case JSON.decode(json) do
+      {:ok, decoded} -> dispatch(decoded, state)
+      {:error, _reason} -> state
+    end
+  end
+
+  defp dispatch(
+         %{
+           "type" => "control_request",
+           "request_id" => id,
+           "request" => %{"subtype" => "initialize"}
+         },
+         state
+       ) do
+    respond_success(id, %{"commands" => [], "models" => []})
+    state
+  end
+
+  defp dispatch(%{"type" => "control_request", "request_id" => id}, state) do
+    respond_success(id, %{})
+    state
+  end
+
+  defp dispatch(%{"type" => "user"}, state) do
+    if System.get_env("FAKE_CLI_ASK") == "1" do
+      emit(%{
+        "type" => "control_request",
+        "request_id" => "fake-tool-request-1",
+        "request" => %{
+          "subtype" => "can_use_tool",
+          "tool_name" => "Bash",
+          "input" => %{"command" => "ls"},
+          "tool_use_id" => "fake-tool-use-1"
+        }
+      })
+
+      %{state | pending_tool_request: "fake-tool-request-1"}
+    else
+      emit_turn()
+      state
+    end
+  end
+
+  defp dispatch(
+         %{"type" => "control_response", "response" => %{"request_id" => id}},
+         %{pending_tool_request: id} = state
+       )
+       when is_binary(id) do
+    emit_turn()
+    %{state | pending_tool_request: nil}
+  end
+
+  defp dispatch(_decoded, state), do: state
+
+  defp emit_turn do
+    emit(init_message())
+    emit(assistant_message())
+    emit(result_message())
+  end
+
+  defp respond_success(request_id, response) do
+    emit(%{
+      "type" => "control_response",
+      "response" => %{
+        "subtype" => "success",
+        "request_id" => request_id,
+        "response" => response
+      }
+    })
+  end
+
+  defp init_message do
+    %{
+      "type" => "system",
+      "subtype" => "init",
+      "cwd" => "/workspace",
+      "session_id" => @session_id,
+      "tools" => [],
+      "mcp_servers" => [],
+      "model" => "fake-model",
+      "permission_mode" => "bypassPermissions",
+      "api_key_source" => "ANTHROPIC_API_KEY"
+    }
+  end
+
+  defp assistant_message do
+    %{
+      "type" => "assistant",
+      "message" => %{
+        "id" => "msg_1",
+        "type" => "message",
+        "role" => "assistant",
+        "model" => "fake-model",
+        "content" => [%{"type" => "text", "text" => "fake explainer output"}],
+        "stop_reason" => "end_turn",
+        "stop_sequence" => nil,
+        "usage" => %{"input_tokens" => 1, "output_tokens" => 2}
+      },
+      "session_id" => @session_id
+    }
+  end
+
+  defp result_message do
+    %{
+      "type" => "result",
+      "subtype" => "success",
+      "is_error" => false,
+      "duration_ms" => 12,
+      "duration_api_ms" => 10,
+      "num_turns" => 1,
+      "result" => "fake explainer output",
+      "session_id" => @session_id,
+      "total_cost_usd" => 0.001,
+      "usage" => %{"input_tokens" => 1, "output_tokens" => 2}
+    }
+  end
+
+  defp emit(map), do: IO.puts(JSON.encode!(map))
+end
+
+FakeClaudeCLI.loop()

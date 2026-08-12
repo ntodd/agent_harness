@@ -566,6 +566,45 @@ is independent of `await/2` and stream timeouts.
 AgentHarness records updated Claude session IDs, but v0.x does not automatically
 recreate a stopped session from Store.
 
+### Run the Claude CLI in another execution environment
+
+`AgentHarness.Providers.Claude.Adapter.Exec` is a `ClaudeCode.Adapter` that
+spawns the CLI through an `AgentHarness.Exec` implementation instead of a
+local port. The stream-json protocol, control handshake, and
+question/approval routing stay in your application's node; only the CLI
+process moves. `AgentHarness.Exec.Local` reproduces local behavior, and an
+application-provided exec module can place the process in a remote sandbox.
+
+```elixir
+{:ok, session} =
+  AgentHarness.start_session(:claude,
+    cwd: "/workspace",
+    env: %{"ANTHROPIC_API_KEY" => api_key},
+    provider_options: %{
+      auth: :inherit,
+      adapter: {
+        AgentHarness.Providers.Claude.Adapter.Exec,
+        exec: {MyApp.SandboxExec, sandbox: sandbox},
+        cli_path: "claude"
+      }
+    }
+  )
+```
+
+The exec adapter requires `auth: :inherit` because `:subscription` pins the
+local port adapter and verifies local CLI authentication. Its spawn spec is
+remote-safe: `cwd` and `cli_path` resolve in the execution environment, and
+the process environment is built only from the SDK variables, the session
+`env`, and `api_key` — the orchestrator's environment is never forwarded.
+
+Two limits to plan around. The adapter does not reconnect after the exec
+reports exit; transport loss fails the turn and retires the session, matching
+AgentHarness's provider-loss semantics. And SDK features that expect
+filesystem access next to the CLI — session history and `skills:`/plugin
+materialization — operate on the orchestrator's filesystem, so do not
+configure `skills:` for a session whose CLI runs elsewhere; deliver
+instructions through `system_prompt` instead.
+
 ## Pi options
 
 Pi is driven through `pi --mode rpc`. It is the smallest of the supported

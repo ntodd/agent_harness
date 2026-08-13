@@ -844,6 +844,43 @@ defmodule AgentHarness.Providers.CodexTest do
     assert :ok = CodexProvider.close_session(runtime)
   end
 
+  test ":sys.get_status on a live session never leaks credentials", %{
+    session: session,
+    sink: sink
+  } do
+    secret = "sk-codex-live-secret"
+
+    config =
+      SessionConfig.new(session,
+        env: %{"OPENAI_API_KEY" => secret},
+        provider_options: %{
+          client: ClientMock,
+          auth: :inherit,
+          codex_options: %{api_key: secret}
+        }
+      )
+
+    expect(ClientMock, :options, fn %{api_key: ^secret} ->
+      {:ok, %Codex.Options{api_key: secret}}
+    end)
+
+    expect(ClientMock, :connect, fn %Codex.Options{}, _options -> {:ok, :connection} end)
+    expect(ClientMock, :disconnect, fn :connection -> :ok end)
+
+    assert {:ok, runtime, _info} = CodexProvider.open_session(config, sink)
+
+    # Crash reports render the state with Erlang ~p formatting, which
+    # bypasses the Inspect protocol, so the raw term must be scrubbed.
+    rendered =
+      ~c"~p"
+      |> :io_lib.format([:sys.get_status(runtime)])
+      |> IO.iodata_to_binary()
+
+    refute rendered =~ secret
+
+    assert :ok = CodexProvider.close_session(runtime)
+  end
+
   defp expect_open do
     expect(ClientMock, :options, fn %{} -> {:ok, :codex_options} end)
 

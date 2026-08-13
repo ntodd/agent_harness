@@ -151,6 +151,38 @@ defmodule AgentHarness.Providers.PiTest do
                )
     end
 
+    test ":sys.get_status on a live session never leaks credentials", %{
+      session: session,
+      sink: sink
+    } do
+      secret = "sk-pi-live-secret"
+      %{transport: transport, session_id: session_id} = stub_transport()
+
+      config =
+        config(session,
+          env: %{"OPENROUTER_API_KEY" => secret},
+          provider_options: %{api_key: secret}
+        )
+
+      task = Task.async(fn -> PiProvider.open_session(config, sink) end)
+
+      owner = await_owner()
+      ack_readiness(owner, transport, session_id)
+
+      assert {:ok, server, _info} = Task.await(task, 2_000)
+
+      # Crash reports render the state with Erlang ~p formatting, which
+      # bypasses the Inspect protocol, so the raw term must be scrubbed.
+      rendered =
+        ~c"~p"
+        |> :io_lib.format([:sys.get_status(server)])
+        |> IO.iodata_to_binary()
+
+      refute rendered =~ secret
+
+      PiProvider.close_session(server)
+    end
+
     test "verifies subscription auth before spawning pi", %{session: session, sink: sink} do
       test = self()
 

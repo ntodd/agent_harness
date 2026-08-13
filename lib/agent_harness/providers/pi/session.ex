@@ -3,6 +3,7 @@ defmodule AgentHarness.Providers.Pi.Session do
 
   use GenServer
 
+  alias AgentHarness.Internal.Redaction
   alias AgentHarness.Provider.{OpenGuardian, Sink}
   alias AgentHarness.Providers.Pi.{Config, Normalizer, Protocol}
   alias AgentHarness.{Response, SessionConfig, Turn}
@@ -199,6 +200,41 @@ defmodule AgentHarness.Providers.Pi.Session do
   end
 
   def handle_info(_message, state), do: {:noreply, state}
+
+  # Both state shapes embed the full SessionConfig plus the prepared spawn
+  # spec, whose `env` carries the session environment and whose argv can
+  # carry `--api-key <key>`. Scrub the raw state so crash reports formatted
+  # with Erlang ~p cannot leak them.
+  @impl true
+  def format_status(%{state: state} = status) do
+    %{status | state: redact_state(state)}
+  end
+
+  def format_status(status), do: status
+
+  defp redact_state(%State{} = state) do
+    %{
+      state
+      | config: SessionConfig.redact(state.config),
+        prepared: redact_prepared(state.prepared)
+    }
+  end
+
+  defp redact_state({:opening, %SessionConfig{} = config, prepared, sink, owner, guardian}) do
+    {:opening, SessionConfig.redact(config), redact_prepared(prepared), sink, owner, guardian}
+  end
+
+  defp redact_state(other), do: other
+
+  @sensitive_flags ["--api-key"]
+
+  defp redact_prepared(prepared) when is_map(prepared) and not is_struct(prepared) do
+    prepared
+    |> Map.replace_lazy(:env, &Redaction.redact_env_charlists/1)
+    |> Map.replace_lazy(:args, &Redaction.redact_argv(&1, @sensitive_flags))
+  end
+
+  defp redact_prepared(_other), do: Redaction.redacted()
 
   @impl true
   def terminate(_reason, %State{transport: transport, client: client})

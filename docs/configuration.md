@@ -127,6 +127,21 @@ providers, custom endpoints, and other intentional routes require
 library capability; read [Billing and authentication](billing-and-authentication.md)
 before unattended use.
 
+### Credentials in logs
+
+Session `env`, `provider_options`, and `mcp_servers` can carry credentials,
+so `SessionConfig` redacts them when inspected: top-level keys stay visible
+with `"[REDACTED]"` values. The `SessionServer` and each provider session
+also scrub their raw state term via `format_status/1`, so the state
+rendered in crash reports and `:sys.get_status/1` is display-safe even
+under Erlang `~p` formatting, which bypasses the Inspect protocol.
+
+One path stays open: supervisor progress and child-start reports include
+the unredacted start arguments of a session process, config included.
+Elixir's logger drops those SASL reports by default; leave
+`handle_sasl_reports` off in any environment whose logs are shipped or
+retained.
+
 ### Codex authentication and environment
 
 Codex defaults to the fail-closed subscription mode:

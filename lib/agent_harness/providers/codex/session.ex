@@ -3,6 +3,7 @@ defmodule AgentHarness.Providers.Codex.Session do
 
   use GenServer
 
+  alias AgentHarness.Internal.Redaction
   alias AgentHarness.Provider.{OpenGuardian, Sink}
   alias AgentHarness.Providers.Codex.{Config, Normalizer, Protocol}
   alias AgentHarness.{Response, SessionConfig, Turn}
@@ -262,6 +263,42 @@ defmodule AgentHarness.Providers.Codex.Session do
 
   def handle_info({:stop_after_provider_failure, _reason}, state),
     do: {:stop, :normal, state}
+
+  # Both state shapes embed the full SessionConfig, and the running state
+  # additionally carries prepared/resolved option containers holding the
+  # merged session env and API keys as plain terms. Scrub the raw state so
+  # crash reports formatted with Erlang ~p cannot leak them.
+  @impl true
+  def format_status(%{state: state} = status) do
+    %{status | state: redact_state(state)}
+  end
+
+  def format_status(status), do: status
+
+  defp redact_state(%State{} = state) do
+    %{
+      state
+      | config: SessionConfig.redact(state.config),
+        prepared: redact_prepared(state.prepared),
+        codex_options: Redaction.redact_values(state.codex_options)
+    }
+  end
+
+  defp redact_state({:opening, %SessionConfig{} = config, sink, owner, guardian}) do
+    {:opening, SessionConfig.redact(config), sink, owner, guardian}
+  end
+
+  defp redact_state(other), do: other
+
+  @prepared_option_keys [:codex_options, :connect_options, :thread_options, :turn_options]
+
+  defp redact_prepared(prepared) when is_map(prepared) and not is_struct(prepared) do
+    Enum.reduce(@prepared_option_keys, prepared, fn key, acc ->
+      Map.replace_lazy(acc, key, &Redaction.redact_values/1)
+    end)
+  end
+
+  defp redact_prepared(_other), do: Redaction.redacted()
 
   @impl true
   def terminate(_reason, %State{} = state), do: cleanup(state)

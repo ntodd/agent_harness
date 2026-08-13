@@ -349,6 +349,26 @@ defmodule AgentHarness.Providers.Claude.Server do
 
   def handle_info(_message, state), do: {:noreply, state}
 
+  # Both state shapes embed the full SessionConfig, which can carry
+  # credentials in env/provider_options. Scrub the raw term so crash
+  # reports formatted with Erlang ~p cannot leak them.
+  @impl true
+  def format_status(%{state: state} = status) do
+    %{status | state: redact_state(state)}
+  end
+
+  def format_status(status), do: status
+
+  defp redact_state(%State{} = state) do
+    %{state | config: AgentHarness.SessionConfig.redact(state.config)}
+  end
+
+  defp redact_state({:opening, %AgentHarness.SessionConfig{} = config, sink, guardian}) do
+    {:opening, AgentHarness.SessionConfig.redact(config), sink, guardian}
+  end
+
+  defp redact_state(other), do: other
+
   @impl true
   def terminate(_reason, %State{} = state) do
     reject_all_pending(state, "Session closed")

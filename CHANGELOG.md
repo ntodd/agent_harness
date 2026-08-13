@@ -7,6 +7,14 @@ published a stable public API.
 
 ## Unreleased
 
+### Added
+
+- Credential redaction for `AgentHarness.SessionConfig`: the `Inspect`
+  implementation keeps `env` keys but replaces values with `"[REDACTED]"` and
+  replaces `provider_options` wholesale. `SessionServer` and the Claude
+  provider server implement `format_status/1` so crash reports and
+  `:sys.get_status/1` scrub the same fields from the raw state term.
+
 ## 0.2.0 - 2026-08-04
 
 ### Added

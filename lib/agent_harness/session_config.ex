@@ -8,6 +8,13 @@ defmodule AgentHarness.SessionConfig do
   bounds asynchronous provider admission. `provider_command_timeout` bounds
   response and cancellation callbacks and must be shorter than the application
   `:provider_command_call_timeout` used by the public response call.
+
+  `env` and `provider_options` can carry credentials, so the `Inspect`
+  implementation redacts them: `env` keeps its keys with `"[REDACTED]"`
+  values, and `provider_options` is replaced wholesale because its contents
+  nest arbitrarily. Code that renders a config through means that bypass the
+  Inspect protocol (for example `inspect(config, structs: false)` or Erlang
+  `~p` formatting of the raw term) still exposes the original values.
   """
 
   alias AgentHarness.SessionRef
@@ -150,5 +157,31 @@ defmodule AgentHarness.SessionConfig do
 
   defp validate_store_failure!(policy) do
     raise ArgumentError, "store_failure must be :degrade or :stop, got: #{inspect(policy)}"
+  end
+
+  # Returns a display-safe copy: env values and provider_options contents are
+  # replaced so credentials cannot reach logs. The result is for formatting
+  # only; provider_options intentionally becomes a string.
+  @doc false
+  def redact(%__MODULE__{} = config) do
+    %{
+      config
+      | env: redact_values(config.env),
+        provider_options: "[REDACTED]"
+    }
+  end
+
+  defp redact_values(env) when is_map(env) do
+    Map.new(env, fn {key, _value} -> {key, "[REDACTED]"} end)
+  end
+
+  defp redact_values(other), do: other
+end
+
+defimpl Inspect, for: AgentHarness.SessionConfig do
+  def inspect(config, opts) do
+    config
+    |> AgentHarness.SessionConfig.redact()
+    |> Inspect.Any.inspect(opts)
   end
 end

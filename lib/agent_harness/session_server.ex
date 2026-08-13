@@ -10,6 +10,7 @@ defmodule AgentHarness.SessionServer do
     EventBuffer,
     Request,
     Response,
+    SessionConfig,
     Subscription,
     Telemetry,
     Turn
@@ -731,6 +732,16 @@ defmodule AgentHarness.SessionServer do
         {:noreply, transport_down(state, reason)}
     end
   end
+
+  # Crash reports and :sys.get_status render the raw state term, which can
+  # bypass the Inspect protocol (Erlang ~p formatting). Scrub credentials out
+  # of the term itself before it reaches any formatter.
+  @impl true
+  def format_status(%{state: %State{} = state} = status) do
+    %{status | state: %{state | config: SessionConfig.redact(state.config)}}
+  end
+
+  def format_status(status), do: status
 
   @impl true
   def terminate(reason, state) do

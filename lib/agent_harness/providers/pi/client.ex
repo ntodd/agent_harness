@@ -68,20 +68,33 @@ defmodule AgentHarness.Providers.Pi.Client.Port do
 
     case resolve_executable(prepared) do
       {:ok, executable} ->
-        port = Port.open({:spawn_executable, executable}, port_options(prepared))
-
-        {:ok,
-         %{
-           port: port,
-           owner: owner,
-           owner_monitor: Process.monitor(owner),
-           buffer: ""
-         }}
+        open_port(executable, prepared, owner)
 
       {:error, reason} ->
         {:stop, reason}
     end
   end
+
+  # A failed Port.open raises with its full argument list — argv and env
+  # included — in the stacktrace, so the reason is reduced to the error name
+  # before it can reach a crash report or the caller.
+  defp open_port(executable, prepared, owner) do
+    port = Port.open({:spawn_executable, executable}, port_options(prepared))
+
+    {:ok,
+     %{
+       port: port,
+       owner: owner,
+       owner_monitor: Process.monitor(owner),
+       buffer: ""
+     }}
+  rescue
+    error -> {:stop, {:spawn_failed, spawn_error(error)}}
+  end
+
+  defp spawn_error(%ErlangError{original: original}) when is_atom(original), do: original
+  defp spawn_error(%ArgumentError{}), do: :badarg
+  defp spawn_error(error), do: error.__struct__
 
   @impl GenServer
   def handle_call({:send_frame, frame}, _from, %{port: port} = state) when not is_nil(port) do

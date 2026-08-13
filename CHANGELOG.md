@@ -26,10 +26,17 @@ published a stable public API.
   arrives before provisioning completes, force-kills the exec on disconnect,
   and redacts `api_key`/`env` from its own inspect output and crash reports.
 - Credential redaction for `AgentHarness.SessionConfig`: the `Inspect`
-  implementation keeps `env` keys but replaces values with `"[REDACTED]"` and
-  replaces `provider_options` wholesale. `SessionServer` and the Claude
-  provider server implement `format_status/1` so crash reports and
-  `:sys.get_status/1` scrub the same fields from the raw state term.
+  implementation keeps the top-level keys of `env`, `provider_options`, and
+  `mcp_servers` and replaces every value with `"[REDACTED]"`, so a
+  misconfigured session stays debuggable without exposing secrets.
+  `SessionServer` and all three provider sessions (Claude, Codex, Pi)
+  implement `format_status/1` so crash reports and `:sys.get_status/1`
+  scrub the raw state term, including the prepared/resolved option
+  containers that carry the merged session env and API keys (Pi's
+  `--api-key` argv value among them). The scrub logic lives in one shared
+  internal helper so the providers cannot drift. A Pi spawn failure reports
+  a reduced reason instead of the raised term whose stacktrace carries the
+  full argv and env.
 
 ## 0.2.0 - 2026-08-04
 

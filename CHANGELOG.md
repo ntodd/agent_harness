@@ -14,6 +14,17 @@ published a stable public API.
   force-kill), with `AgentHarness.Exec.Local` as the port-backed default.
   Remote execution backends (SSH, sandbox vendors) implement this behaviour
   outside the library.
+- `AgentHarness.Providers.Claude.Adapter.Exec`, a `ClaudeCode.Adapter` that
+  runs the Claude Code CLI through any `AgentHarness.Exec` implementation.
+  The stream-json protocol, control handshake, and question/approval routing
+  stay on the orchestrator while the CLI runs wherever the exec module puts
+  it. Requires `auth: :inherit`; the spawn spec is remote-safe (explicit env,
+  no local environment forwarding, `cwd` resolved where the CLI runs). SDK
+  features that need filesystem access next to the CLI (history, plugin/skill
+  materialization) stay orchestrator-local and are out of scope for this
+  adapter. The adapter monitors pid exec handles, defers exec output that
+  arrives before provisioning completes, force-kills the exec on disconnect,
+  and redacts `api_key`/`env` from its own inspect output and crash reports.
 - Credential redaction for `AgentHarness.SessionConfig`: the `Inspect`
   implementation keeps `env` keys but replaces values with `"[REDACTED]"` and
   replaces `provider_options` wholesale. `SessionServer` and the Claude

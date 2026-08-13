@@ -9,6 +9,11 @@ published a stable public API.
 
 ### Added
 
+- `AgentHarness.Exec`, a byte-level behaviour for running a command in some
+  execution environment (spawn with argv/env/cwd, stream output, write stdin,
+  force-kill), with `AgentHarness.Exec.Local` as the port-backed default.
+  Remote execution backends (SSH, sandbox vendors) implement this behaviour
+  outside the library.
 - Credential redaction for `AgentHarness.SessionConfig`: the `Inspect`
   implementation keeps `env` keys but replaces values with `"[REDACTED]"` and
   replaces `provider_options` wholesale. `SessionServer` and the Claude

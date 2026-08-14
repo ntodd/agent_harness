@@ -456,7 +456,9 @@ the session `env`. Model routing config (`model_payload`) is not translated
 into app-server flags; set the model per session or per thread instead.
 
 As with the Claude exec adapter, transport loss fails the turn and retires
-the session, and `skills:` paths must exist where the CLI runs.
+the session, and `skills:` paths must exist where the CLI runs. See
+[Writing an Exec implementation](writing-an-exec-implementation.md) for
+building the exec module itself.
 
 ### Resume a Codex conversation
 
@@ -644,6 +646,9 @@ remote-safe: `cwd` and `cli_path` resolve in the execution environment, and
 the process environment is built only from the SDK variables, the session
 `env`, and `api_key` — the orchestrator's environment is never forwarded.
 
+[Writing an Exec implementation](writing-an-exec-implementation.md) walks
+through building an exec module, using E2B as the example.
+
 Two limits to plan around. The adapter does not reconnect after the exec
 reports exit; transport loss fails the turn and retires the session, matching
 AgentHarness's provider-loss semantics. And SDK features that expect
@@ -721,6 +726,8 @@ local `pi /login` state that says nothing about the environment the CLI would
 run in. `executable` and `cwd` resolve in the execution environment, only the
 session `env` (and `agent_dir`) is forwarded, and stderr stays out of the
 data stream. `skills:` and `extensions:` paths must exist where the CLI runs.
+See [Writing an Exec implementation](writing-an-exec-implementation.md) for
+building the exec module itself.
 
 ### Questions from Pi
 

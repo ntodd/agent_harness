@@ -38,6 +38,14 @@ published a stable public API.
   a reduced reason instead of the raised term whose stacktrace carries the
   full argv and env.
 
+### Fixed
+
+- Pi turns settle again on pi ≥ 0.79, which removed the `agent_settled`
+  frame. The session now settles on `agent_end` with `willRetry: false`
+  (pi drains its steer/follow-up queues before emitting it); older CLIs
+  that still send `agent_settled` afterwards hit a harmless no-op. Without
+  this, every turn hung until the harness timeout regardless of transport.
+
 ## 0.2.0 - 2026-08-04
 
 ### Added

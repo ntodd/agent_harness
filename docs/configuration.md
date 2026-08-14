@@ -705,7 +705,7 @@ The protocol support is in place for when a public API lands.
 | Fork                    | Unsupported in the current adapter                                                     | Native via `resume` plus `fork_session`    | Native via `fork`                             |
 | Approval/sandbox config | Common session fields                                                                  | Common fields with Claude-native values    | Rejected; pi does not sandbox                 |
 | Steering                | Capability currently unsupported                                                       | Capability currently unsupported           | Supported by pi, not yet exposed by the harness |
-| Terminal signal         | Codex terminal turn event                                                              | Claude `ResultMessage`                     | `agent_settled`, not `agent_end`              |
+| Terminal signal         | Codex terminal turn event                                                              | Claude `ResultMessage`                     | Non-retrying `agent_end` (`agent_settled` on older CLIs) |
 
 Provider-specific event data remains available in `Event.raw`. Write your
 orchestrator against normalized lifecycle and request events, then inspect

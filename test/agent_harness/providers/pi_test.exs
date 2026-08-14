@@ -283,6 +283,52 @@ defmodule AgentHarness.Providers.PiTest do
                      2_000
     end
 
+    # pi 0.79 removed the agent_settled frame; agent_end (willRetry: false) is
+    # now the terminal frame of a run. Older captures emit both, and settling
+    # twice is a no-op, so replaying without the settle frame covers the
+    # current CLI while the recorded fixtures keep covering the old one.
+    test "a turn settles on agent_end when pi omits agent_settled", %{
+      server: server,
+      owner: owner,
+      transport: transport,
+      session: session
+    } do
+      start_turn!(server, owner, transport, session, "turn-3b")
+
+      Enum.each(fixture("text_turn.jsonl"), fn frame ->
+        unless frame["type"] in ["response", "agent_settled"] do
+          push(owner, transport, frame)
+        end
+      end)
+
+      assert_receive {:agent_harness_provider, _ref,
+                      {:finish, "turn-3b", :completed, result, _raw}},
+                     2_000
+
+      assert result.text == "pong"
+    end
+
+    test "a retrying agent_end does not settle the turn", %{
+      server: server,
+      owner: owner,
+      transport: transport,
+      session: session
+    } do
+      start_turn!(server, owner, transport, session, "turn-3c")
+
+      push(owner, transport, %{"type" => "agent_end", "willRetry" => true})
+
+      refute_receive {:agent_harness_provider, _ref,
+                      {:finish, "turn-3c", _status, _result, _raw}},
+                     300
+
+      push(owner, transport, %{"type" => "agent_end", "willRetry" => false})
+
+      assert_receive {:agent_harness_provider, _ref,
+                      {:finish, "turn-3c", :completed, _result, _raw}},
+                     2_000
+    end
+
     test "an aborted run finishes as cancelled even though the ack trails the settle", %{
       server: server,
       owner: owner,

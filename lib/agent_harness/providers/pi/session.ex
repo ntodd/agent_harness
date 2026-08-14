@@ -311,6 +311,16 @@ defmodule AgentHarness.Providers.Pi.Session do
     end
   end
 
+  # pi 0.79 dropped the agent_settled frame; agent_end became the terminal
+  # frame of a run, with willRetry marking error-retry continuations. The
+  # queues drain before agent_end fires, so a non-retrying end is the settle
+  # point. Older CLIs still send agent_settled afterwards, which then finds
+  # no active turn and is a no-op.
+  defp handle_frame(state, {:event, :agent_run_ended, %{will_retry: false} = data}, raw) do
+    emit(state, :agent_run_ended, data, raw)
+    settle(state, raw)
+  end
+
   defp handle_frame(state, {:event, type, data}, raw) do
     emit(state, type, data, raw)
     accumulate(state, type, data)
@@ -333,7 +343,11 @@ defmodule AgentHarness.Providers.Pi.Session do
     put_active_status(state, status)
   end
 
-  defp handle_frame(state, {:settle, _data}, raw) do
+  defp handle_frame(state, {:settle, _data}, raw), do: settle(state, raw)
+
+  defp handle_frame(state, :ignore, _raw), do: state
+
+  defp settle(state, raw) do
     case state.active do
       %{turn_id: turn_id, status: status} = active ->
         Sink.finish(state.sink, turn_id, status, turn_result(state, active), raw)
@@ -343,8 +357,6 @@ defmodule AgentHarness.Providers.Pi.Session do
         state
     end
   end
-
-  defp handle_frame(state, :ignore, _raw), do: state
 
   defp turn_result(state, active) do
     %{provider_session_id: state.provider_session_id}

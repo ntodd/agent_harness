@@ -59,6 +59,15 @@ published a stable public API.
   a reduced reason instead of the raised term whose stacktrace carries the
   full argv and env.
 
+### Changed
+
+- `codex_sdk` is now `~> 0.19.0` (from `~> 0.18.1`), which fixes interrupted
+  app-server streams waiting indefinitely and moves the runtime boundary to
+  `cli_subprocess_core 0.7`. The connection call contract, JSONL protocol
+  helpers, and option fields the Codex exec connection mirrors are unchanged
+  in this release; all three providers were re-validated live on both the
+  local and exec transports.
+
 ### Fixed
 
 - Pi turns settle again on pi ≥ 0.79, which removed the `agent_settled`

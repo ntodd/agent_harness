@@ -21,6 +21,12 @@ defmodule AgentHarness.Providers.Pi do
   `auth: :subscription` policy requires a credential established through pi's
   `/login` OAuth flow and rejects API-key routes. Set
   `provider_options: %{auth: :inherit}` to use an API key.
+
+  The CLI does not have to run locally: `provider_options: %{exec: {module,
+  opts}}` runs it through any `AgentHarness.Exec` implementation (a remote
+  sandbox, an SSH channel) while the RPC protocol stays on this node. Remote
+  execution requires `auth: :inherit`; see
+  `AgentHarness.Providers.Pi.Client.Exec`.
   """
 
   @behaviour AgentHarness.Provider

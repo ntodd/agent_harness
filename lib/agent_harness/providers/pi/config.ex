@@ -11,6 +11,7 @@ defmodule AgentHarness.Providers.Pi.Config do
     :auth,
     :client,
     :exclude_tools,
+    :exec,
     :executable,
     :extensions,
     :fork,
@@ -43,6 +44,7 @@ defmodule AgentHarness.Providers.Pi.Config do
 
   @type prepared :: %{
           client: module(),
+          exec: {module(), keyword()},
           executable: String.t(),
           args: [String.t()],
           env: [{charlist(), charlist()}],
@@ -64,10 +66,12 @@ defmodule AgentHarness.Providers.Pi.Config do
          :ok <- validate_session_options(options),
          :ok <- validate_subscription_options(auth, options),
          :ok <- validate_subscription_env(auth, config.env),
+         {:ok, exec} <- normalize_exec(Map.get(options, :exec)),
          {:ok, skill_args} <- skill_args(config.skills) do
       {:ok,
        %{
-         client: Map.get(options, :client, AgentHarness.Providers.Pi.Client.Port),
+         client: client(options),
+         exec: exec,
          executable: Map.get(options, :executable, @default_executable),
          args: args(config, options, skill_args),
          env: env(config, options),
@@ -80,6 +84,25 @@ defmodule AgentHarness.Providers.Pi.Config do
        }}
     end
   end
+
+  # An exec option implies the exec client unless the caller picked one
+  # explicitly; without it the local port client remains the default.
+  defp client(options) do
+    Map.get(options, :client) ||
+      if Map.get(options, :exec) do
+        AgentHarness.Providers.Pi.Client.Exec
+      else
+        AgentHarness.Providers.Pi.Client.Port
+      end
+  end
+
+  defp normalize_exec(nil), do: {:ok, {AgentHarness.Exec.Local, []}}
+
+  defp normalize_exec({module, opts}) when is_atom(module) and is_list(opts),
+    do: {:ok, {module, opts}}
+
+  defp normalize_exec(module) when is_atom(module), do: {:ok, {module, []}}
+  defp normalize_exec(other), do: {:error, {:invalid_exec, other}}
 
   @doc """
   Session id pi will report back, or `nil` when pi picks its own.
@@ -223,10 +246,17 @@ defmodule AgentHarness.Providers.Pi.Config do
   defp validate_subscription_options(:inherit, _options), do: :ok
 
   defp validate_subscription_options(:subscription, options) do
-    if Map.has_key?(options, :api_key) do
-      {:error, {:subscription_auth_conflict, :api_key}}
-    else
-      :ok
+    cond do
+      Map.has_key?(options, :api_key) ->
+        {:error, {:subscription_auth_conflict, :api_key}}
+
+      # Subscription auth is verified against local `pi /login` state, which
+      # says nothing about the environment an exec would run the CLI in.
+      not is_nil(Map.get(options, :exec)) ->
+        {:error, {:subscription_auth_conflict, :exec}}
+
+      true ->
+        :ok
     end
   end
 

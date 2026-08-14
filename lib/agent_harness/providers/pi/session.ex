@@ -232,9 +232,15 @@ defmodule AgentHarness.Providers.Pi.Session do
     prepared
     |> Map.replace_lazy(:env, &Redaction.redact_env_charlists/1)
     |> Map.replace_lazy(:args, &Redaction.redact_argv(&1, @sensitive_flags))
+    |> Map.replace_lazy(:exec, &redact_exec/1)
   end
 
   defp redact_prepared(_other), do: Redaction.redacted()
+
+  # Exec options are opaque to the harness and routinely carry sandbox
+  # credentials; keep the module and option names, drop every value.
+  defp redact_exec({module, opts}), do: {module, Redaction.redact_values(opts)}
+  defp redact_exec(_other), do: Redaction.redacted()
 
   @impl true
   def terminate(_reason, %State{transport: transport, client: client})

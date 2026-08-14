@@ -9,6 +9,16 @@ published a stable public API.
 
 ### Added
 
+- Remote execution for the Pi provider.
+  `AgentHarness.Providers.Pi.Client.Exec` runs `pi --mode rpc` through any
+  `AgentHarness.Exec` implementation, selected with
+  `provider_options: %{exec: {module, opts}}` under `auth: :inherit`; the
+  fail-closed `:subscription` mode rejects the option because its credential
+  checks inspect local state. The executable resolves in the execution
+  environment, only explicit env entries are forwarded, stderr stays out of
+  the JSONL stream, and exec options are scrubbed from crash reports since
+  they routinely carry sandbox credentials. Live-validated against the real
+  CLI.
 - `AgentHarness.Exec`, a byte-level behaviour for running a command in some
   execution environment (spawn with argv/env/cwd, stream output, write stdin,
   force-kill), with `AgentHarness.Exec.Local` as the port-backed default.

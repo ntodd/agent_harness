@@ -97,4 +97,21 @@ defmodule AgentHarness.Providers.Pi.SessionRedactionTest do
 
     assert %{message: :hello, state: {:failed, :nope}} = Session.format_status(status)
   end
+
+  test "format_status scrubs exec options, which can carry sandbox credentials" do
+    session = SessionRef.new(:pi, id: "pi-redaction-exec")
+
+    config =
+      SessionConfig.new(session,
+        provider_options: %{
+          auth: :inherit,
+          exec: {AgentHarness.ExecMock, sandbox_token: @secret}
+        }
+      )
+
+    %{state: scrubbed} = Session.format_status(%{state: state(config, prepared(config))})
+
+    refute erlang_format(scrubbed) =~ @secret
+    assert {AgentHarness.ExecMock, [sandbox_token: "[REDACTED]"]} = scrubbed.prepared.exec
+  end
 end

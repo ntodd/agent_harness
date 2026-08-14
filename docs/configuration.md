@@ -646,6 +646,7 @@ sets `mcp_servers`, `approval_policy`, or `sandbox` is rejected at
 | `api_key`        | Explicit key; only valid with `auth: :inherit`                     |
 | `provider`       | Pi provider name when the model pattern does not carry one         |
 | `executable`     | Path or name of the `pi` binary                                    |
+| `exec`           | Remote execution (see below); requires `auth: :inherit`            |
 | `tools`          | Allowlist of tool names                                            |
 | `exclude_tools`  | Denylist of tool names                                             |
 | `no_tools`       | Disable all tools                                                  |
@@ -663,6 +664,31 @@ By default the harness assigns its own session id with `--session-id`, so
 `provider_session_id` matches the AgentHarness session id. Setting `resume`,
 `fork`, or `session: false` hands that choice back to pi, and the id is read
 from pi instead.
+
+### Run the pi CLI in another execution environment
+
+Setting `exec:` runs `pi --mode rpc` through an `AgentHarness.Exec`
+implementation instead of a local port. Pi's JSONL protocol stays in your
+application's node; only the CLI process moves.
+
+```elixir
+{:ok, session} =
+  AgentHarness.start_session(:pi,
+    cwd: "/workspace",
+    model: "openai/gpt-4.1-nano",
+    provider_options: %{
+      auth: :inherit,
+      exec: {MyApp.SandboxExec, sandbox: sandbox},
+      executable: "pi"
+    }
+  )
+```
+
+Remote execution requires `auth: :inherit` because `:subscription` verifies
+local `pi /login` state that says nothing about the environment the CLI would
+run in. `executable` and `cwd` resolve in the execution environment, only the
+session `env` (and `agent_dir`) is forwarded, and stderr stays out of the
+data stream. `skills:` and `extensions:` paths must exist where the CLI runs.
 
 ### Questions from Pi
 

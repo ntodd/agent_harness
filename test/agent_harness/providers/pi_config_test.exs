@@ -190,6 +190,65 @@ defmodule AgentHarness.Providers.PiConfigTest do
     end
   end
 
+  describe "prepare/1 remote execution" do
+    test "an exec option selects the exec client and rides along in prepared" do
+      {:ok, prepared} =
+        Config.prepare(
+          session_config(
+            provider_options: %{auth: :inherit, exec: {AgentHarness.ExecMock, sandbox: :sb}}
+          )
+        )
+
+      assert prepared.client == AgentHarness.Providers.Pi.Client.Exec
+      assert prepared.exec == {AgentHarness.ExecMock, sandbox: :sb}
+    end
+
+    test "a bare exec module normalizes to empty options" do
+      {:ok, prepared} =
+        Config.prepare(
+          session_config(provider_options: %{auth: :inherit, exec: AgentHarness.ExecMock})
+        )
+
+      assert prepared.exec == {AgentHarness.ExecMock, []}
+    end
+
+    test "an explicit client wins over the exec default" do
+      {:ok, prepared} =
+        Config.prepare(
+          session_config(
+            provider_options: %{
+              auth: :inherit,
+              client: SomeCustomClient,
+              exec: {AgentHarness.ExecMock, []}
+            }
+          )
+        )
+
+      assert prepared.client == SomeCustomClient
+    end
+
+    test "without an exec option the client defaults to the local port" do
+      {:ok, prepared} = Config.prepare(session_config())
+
+      assert prepared.client == AgentHarness.Providers.Pi.Client.Port
+      assert prepared.exec == {AgentHarness.Exec.Local, []}
+    end
+
+    test "subscription auth rejects remote execution" do
+      assert {:error, {:subscription_auth_conflict, :exec}} =
+               Config.prepare(
+                 session_config(
+                   provider_options: %{auth: :subscription, exec: {AgentHarness.ExecMock, []}}
+                 )
+               )
+    end
+
+    test "rejects a malformed exec option" do
+      assert {:error, {:invalid_exec, "nope"}} =
+               Config.prepare(session_config(provider_options: %{auth: :inherit, exec: "nope"}))
+    end
+  end
+
   defp arg_value(args, flag) do
     args
     |> arg_values(flag)

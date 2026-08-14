@@ -9,6 +9,13 @@ published a stable public API.
 
 ### Added
 
+- A guide on writing an `AgentHarness.Exec` implementation
+  ([Writing an Exec implementation](docs/writing-an-exec-implementation.md)),
+  walking through the contract's shape and its sharp edges — exactly-once
+  exit delivery, kill reaching the remote process rather than just the
+  stream, queued writes before the remote pid is known, spec translation,
+  and credential redaction — using a production E2B sandbox adapter as the
+  example.
 - Remote execution for the Pi provider.
   `AgentHarness.Providers.Pi.Client.Exec` runs `pi --mode rpc` through any
   `AgentHarness.Exec` implementation, selected with

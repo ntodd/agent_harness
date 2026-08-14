@@ -56,6 +56,7 @@ defmodule AgentHarness.MixProject do
       "docs/genserver-integration.md",
       "docs/lifecycle-and-events.md",
       "docs/architecture.md",
+      "docs/writing-an-exec-implementation.md",
       "docs/billing-and-authentication.md",
       "docs/testing.md"
     ]

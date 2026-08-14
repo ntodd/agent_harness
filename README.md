@@ -265,7 +265,9 @@ mode verifies local CLI state, which says nothing about the environment the
 exec would run the process in. The exec contract is byte-level and
 protocol-free (spawn with argv/env/cwd, stream output, write stdin,
 force-kill), so one implementation covers all three providers. Per-provider
-details are in [Provider configuration](docs/configuration.md).
+details are in [Provider configuration](docs/configuration.md), and
+[Writing an Exec implementation](docs/writing-an-exec-implementation.md)
+walks through building a sandbox adapter, using E2B as the example.
 
 ## Documentation
 
@@ -274,6 +276,7 @@ details are in [Provider configuration](docs/configuration.md).
 - [Driving AgentHarness from a GenServer](docs/genserver-integration.md)
 - [Lifecycle, events, requests, and persistence](docs/lifecycle-and-events.md)
 - [Supervision, concurrency, and scaling](docs/architecture.md)
+- [Writing an Exec implementation (remote sandboxes)](docs/writing-an-exec-implementation.md)
 - [Billing and authentication](docs/billing-and-authentication.md)
 - [Tests and live CLI checks](docs/testing.md)
 

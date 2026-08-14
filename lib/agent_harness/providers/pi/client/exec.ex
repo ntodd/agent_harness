@@ -1,7 +1,7 @@
 defmodule AgentHarness.Providers.Pi.Client.Exec do
   @moduledoc """
-  `AgentHarness.Providers.Pi.Client` that runs the pi CLI through an
-  `AgentHarness.Exec` implementation instead of a local port.
+  Pi client that runs the CLI through an `AgentHarness.Exec` implementation
+  instead of a local port.
 
   The pi RPC protocol — JSONL framing, prompts, dialogs — stays on the
   orchestrator; the `pi --mode rpc` process itself runs wherever the

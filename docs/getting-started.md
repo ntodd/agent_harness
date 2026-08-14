@@ -1,8 +1,10 @@
 # Getting started
 
-AgentHarness turns a locally installed coding-agent CLI into an OTP-managed
-session. A session is a conversation with a stable ID; a turn is one request
-within that conversation.
+AgentHarness turns a coding-agent CLI into an OTP-managed session. A session
+is a conversation with a stable ID; a turn is one request within that
+conversation. By default the CLI runs locally; each provider can also run it
+in another execution environment (see
+[Provider configuration](configuration.md)).
 
 This guide covers the provider-neutral public API. See
 [Provider configuration](configuration.md) for Codex- and Claude-specific

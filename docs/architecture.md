@@ -76,6 +76,15 @@ Provider adapters hide their concrete process model:
 - Codex uses an app-server connection and a thread.
 - Claude uses a bidirectional CLI session plus a temporary task that consumes
   each turn's stream.
+- Pi uses a transport process that owns one `pi --mode rpc` OS process.
+
+Each adapter can spawn its CLI through an `AgentHarness.Exec` implementation
+instead of a local port, which moves the OS process to another execution
+environment while the protocol handling stays in this VM. Exec
+implementations monitor their owning process and release the remote resource
+if it dies, so runtime ownership semantics are the same in both modes:
+transport loss is session-fatal, and a force-kill stops the underlying
+process wherever it runs.
 
 Provider runtimes live under `ProviderSupervisor`; temporary provider-open,
 startup-finalization/rollback, turn-admission, response/cancellation,

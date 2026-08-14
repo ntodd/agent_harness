@@ -1,14 +1,17 @@
 # AgentHarness
 
-AgentHarness is an Elixir library for running locally installed coding agents
-as supervised OTP sessions. It currently supports Codex CLI, Claude Code, and
-Pi, normalizes their streaming output, and gives callers one interface for
-turns, questions, approvals, cancellation, completion, and event replay.
+AgentHarness is an Elixir library for running coding agents as supervised OTP
+sessions. It currently supports Codex CLI, Claude Code, and Pi, normalizes
+their streaming output, and gives callers one interface for turns, questions,
+approvals, cancellation, completion, and event replay.
 
 AgentHarness is deliberately **bring your own CLI**. It does not proxy
-credentials, create API keys, or log in on your behalf. The provider processes
-run on your machine with the accounts already configured in their official
-CLIs.
+credentials, create API keys, or log in on your behalf. By default the
+provider processes run on your machine with the accounts already configured in
+their official CLIs. Each provider can also run its CLI in another execution
+environment (a remote sandbox, an SSH channel) through the
+`AgentHarness.Exec` behaviour while the protocol stays on your node; see
+[Remote execution](#remote-execution).
 
 > AgentHarness is an early v0.x library. Its core lifecycle is tested, but the
 > public API and provider event vocabulary may still evolve.
@@ -23,6 +26,8 @@ CLIs.
 - Native session monitors and live/stored session inventory for orchestrators
 - Structured questions, approvals, and MCP elicitation
 - Per-session MCP servers, skills, model, workspace, sandbox, and provider options
+- A byte-level `AgentHarness.Exec` behaviour for running any provider's CLI in
+  another execution environment, with a port-backed local default
 - An in-memory event and lifecycle store with a behaviour for durable adapters
 - Stable session and turn handles that contain IDs rather than PIDs
 - Telemetry spans and events for commands, session/turn lifetimes, requests, and Store writes
@@ -222,6 +227,45 @@ The providers materialize these settings differently. Claude loads standalone
 skills through a temporary session plugin; Codex sends explicit skill items
 with each turn. Details and provider-specific options are in
 [Provider configuration](docs/configuration.md).
+
+## Remote execution
+
+Each provider can run its CLI through an `AgentHarness.Exec` implementation
+instead of a local port. The provider protocol (streaming, questions,
+approvals, cancellation) stays in your application's node; only the CLI
+process moves. `AgentHarness.Exec.Local` is the default and reproduces local
+behavior, and an application-provided exec module can place the process in a
+remote sandbox:
+
+```elixir
+# Pi and Codex
+{:ok, session} =
+  AgentHarness.start_session(:codex,
+    cwd: "/workspace",
+    provider_options: %{
+      auth: :inherit,
+      exec: {MyApp.SandboxExec, sandbox: sandbox}
+    }
+  )
+
+# Claude selects it through the claude_code adapter option
+{:ok, session} =
+  AgentHarness.start_session(:claude,
+    cwd: "/workspace",
+    provider_options: %{
+      auth: :inherit,
+      adapter: {AgentHarness.Providers.Claude.Adapter.Exec,
+                exec: {MyApp.SandboxExec, sandbox: sandbox}}
+    }
+  )
+```
+
+Remote execution requires `auth: :inherit`: the fail-closed `:subscription`
+mode verifies local CLI state, which says nothing about the environment the
+exec would run the process in. The exec contract is byte-level and
+protocol-free (spawn with argv/env/cwd, stream output, write stdin,
+force-kill), so one implementation covers all three providers. Per-provider
+details are in [Provider configuration](docs/configuration.md).
 
 ## Documentation
 

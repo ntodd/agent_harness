@@ -10,12 +10,13 @@ defmodule AgentHarness.Providers.Codex.ExecConnection do
   server-initiated requests (approvals) — while the CLI process itself runs
   wherever the configured exec module puts it.
 
-  The process answers the same call messages as `Codex.AppServer.Connection`
-  and `Codex.AppServer.RemoteConnection`, so everything downstream in the
-  SDK — `Codex.Thread`, `Codex.AppServer.respond/3`, the harness
-  `ConnectionProxy` — works against this pid unchanged. It intentionally
-  mirrors `Codex.AppServer.RemoteConnection` and reuses the SDK's protocol
-  helpers; treat codex_sdk upgrades as a review point for this file.
+  The process answers the same call messages as the SDK's own connections
+  (Codex.AppServer.Connection and Codex.AppServer.RemoteConnection, both
+  private), so everything downstream in the SDK — `Codex.Thread`,
+  `Codex.AppServer.respond/3`, the harness `ConnectionProxy` — works against
+  this pid unchanged. It intentionally mirrors the SDK's remote connection
+  and reuses its protocol helpers; treat codex_sdk upgrades as a review
+  point for this file.
 
   ## Options
 

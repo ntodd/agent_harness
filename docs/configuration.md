@@ -107,10 +107,11 @@ process.
 
 ## Bring your own CLI and authentication
 
-AgentHarness launches a local CLI and relies on credentials that CLI already
-owns. It does not open login flows, accept passwords, store provider
-credentials, or choose a paid plan for you. The selected executable and any
-custom client module are trusted code boundaries.
+AgentHarness launches a CLI (local by default) and relies on credentials that
+CLI's environment already owns. It does not open login flows, accept
+passwords, store provider credentials, or choose a paid plan for you. The
+selected executable, any custom client module, and any `AgentHarness.Exec`
+implementation are trusted code boundaries.
 
 Authenticate each CLI outside your Elixir application:
 

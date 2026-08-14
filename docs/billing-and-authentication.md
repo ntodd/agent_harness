@@ -56,6 +56,13 @@ provider_options: %{auth: :inherit}
 endpoints, or managed environment configuration. Any resulting charges follow
 that provider's normal terms.
 
+Remote execution also requires `:inherit`. Subscription mode's checks inspect
+local state (a saved login, the CLI's credential store, local config layers),
+which says nothing about the environment an `AgentHarness.Exec`
+implementation would run the CLI in, so every adapter rejects its remote
+execution option under `:subscription` rather than trusting an environment it
+cannot verify.
+
 Pi enforces the same policy differently, because it is bring-your-own-model
 rather than tied to one account. Under `:subscription` the adapter rejects an
 explicit `api_key`, refuses session `env` entries that look like credentials

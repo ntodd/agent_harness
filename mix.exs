@@ -1,7 +1,7 @@
 defmodule AgentHarness.MixProject do
   use Mix.Project
 
-  @version "0.2.0"
+  @version "0.3.0"
   @source_url "https://github.com/ntodd/agent_harness"
 
   def project do
@@ -16,7 +16,7 @@ defmodule AgentHarness.MixProject do
       package: package(),
       elixirc_paths: elixirc_paths(Mix.env()),
       aliases: aliases(),
-      description: "Supervised Elixir sessions for local coding-agent harnesses",
+      description: "Supervised Elixir sessions for coding-agent harnesses",
       source_url: @source_url,
       homepage_url: @source_url
     ]

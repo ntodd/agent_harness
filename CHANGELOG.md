@@ -5,7 +5,7 @@ All notable changes to AgentHarness will be documented in this file.
 The project follows [Semantic Versioning](https://semver.org/). It has not yet
 published a stable public API.
 
-## Unreleased
+## 0.3.0 - 2026-08-14
 
 ### Added
 
@@ -77,11 +77,12 @@ published a stable public API.
 
 ### Fixed
 
-- Pi turns settle again on pi ≥ 0.79, which removed the `agent_settled`
-  frame. The session now settles on `agent_end` with `willRetry: false`
-  (pi drains its steer/follow-up queues before emitting it); older CLIs
-  that still send `agent_settled` afterwards hit a harmless no-op. Without
-  this, every turn hung until the harness timeout regardless of transport.
+- Pi turns settle again on pi releases that no longer emit the
+  `agent_settled` frame (observed on pi 0.79.10). The session now settles
+  on `agent_end` with `willRetry: false` (pi drains its steer/follow-up
+  queues before emitting it); older CLIs that still send `agent_settled`
+  afterwards hit a harmless no-op. Without this, every turn hung until the
+  harness timeout regardless of transport.
 
 ## 0.2.0 - 2026-08-04
 

@@ -80,7 +80,7 @@ Add AgentHarness to your dependencies:
 ```elixir
 def deps do
   [
-    {:agent_harness, "~> 0.2.0"}
+    {:agent_harness, "~> 0.3.0"}
   ]
 end
 ```

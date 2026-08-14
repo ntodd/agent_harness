@@ -203,9 +203,14 @@ working directory. Then inspect:
 `pi --mode rpc` process. The normalizer and session tests replay them, so those
 assertions track what pi actually emits rather than what its documentation
 describes. Several adapter decisions came from differences between the two:
-readiness needs a `get_state` probe because pi sends no startup frame,
-`agent_settled` rather than `agent_end` is the terminal marker, and an `abort`
+readiness needs a `get_state` probe because pi sends no startup frame, the
+terminal marker is a non-retrying `agent_end` (pi 0.79 removed the
+`agent_settled` frame the fixtures still carry), and an `abort`
 acknowledgement arrives after the run has already settled.
+
+The recorded fixtures predate pi 0.79, so they still include `agent_settled`
+frames; the session treats a settle after `agent_end` as a no-op, and one test
+replays a fixture with the settle frame stripped to cover the current CLI.
 
 To refresh a fixture, run the corresponding scenario against a real pi process
 and save its stdout. Only `message_update` frames should be decimated; every

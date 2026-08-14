@@ -228,6 +228,67 @@ defmodule AgentHarness.Providers.Codex.ConfigTest do
     assert {:error, {:invalid_auth_mode, :api}} = Config.prepare(config)
   end
 
+  test "an exec option selects the exec client and rides along in connect options" do
+    config = %SessionConfig{
+      session_id: "exec-select",
+      provider: :codex,
+      provider_options: %{
+        auth: :inherit,
+        exec: {AgentHarness.ExecMock, sandbox: :sb}
+      }
+    }
+
+    assert {:ok, prepared} = Config.prepare(config)
+    assert prepared.client == AgentHarness.Providers.Codex.Client.Exec
+    assert prepared.connect_options[:exec] == {AgentHarness.ExecMock, sandbox: :sb}
+  end
+
+  test "a bare exec module normalizes to empty options" do
+    config = %SessionConfig{
+      session_id: "exec-bare",
+      provider: :codex,
+      provider_options: %{auth: :inherit, exec: AgentHarness.ExecMock}
+    }
+
+    assert {:ok, prepared} = Config.prepare(config)
+    assert prepared.connect_options[:exec] == {AgentHarness.ExecMock, []}
+  end
+
+  test "an explicit client wins over the exec default" do
+    config = %SessionConfig{
+      session_id: "exec-explicit-client",
+      provider: :codex,
+      provider_options: %{
+        auth: :inherit,
+        client: SomeCustomClient,
+        exec: {AgentHarness.ExecMock, []}
+      }
+    }
+
+    assert {:ok, prepared} = Config.prepare(config)
+    assert prepared.client == SomeCustomClient
+  end
+
+  test "subscription auth rejects remote execution" do
+    config = %SessionConfig{
+      session_id: "exec-subscription",
+      provider: :codex,
+      provider_options: %{auth: :subscription, exec: {AgentHarness.ExecMock, []}}
+    }
+
+    assert {:error, {:subscription_auth_conflict, :exec}} = Config.prepare(config)
+  end
+
+  test "rejects a malformed exec option" do
+    config = %SessionConfig{
+      session_id: "exec-malformed",
+      provider: :codex,
+      provider_options: %{auth: :inherit, exec: "nope"}
+    }
+
+    assert {:error, {:invalid_exec, "nope"}} = Config.prepare(config)
+  end
+
   defp empty_codex_home! do
     path =
       Path.join(

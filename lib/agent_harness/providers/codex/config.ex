@@ -123,6 +123,8 @@ defmodule AgentHarness.Providers.Codex.Config do
          {:ok, codex_options} <-
            options |> fetch(:codex_options, %{}) |> normalize_map(:codex_options),
          :ok <- validate_subscription_options(auth, codex_options),
+         {:ok, exec} <- normalize_exec(fetch(options, :exec, nil)),
+         :ok <- validate_subscription_exec(auth, exec),
          {:ok, connect_options} <-
            options
            |> fetch(:connect_options, [])
@@ -151,10 +153,11 @@ defmodule AgentHarness.Providers.Codex.Config do
 
       codex_options = enforce_codex_auth(codex_options, auth)
       connect_options = enforce_process_auth(connect_options, auth)
+      connect_options = put_exec(connect_options, exec)
 
       {:ok,
        %{
-         client: fetch(options, :client, Client.SDK),
+         client: client(options, exec),
          codex_options: codex_options,
          connect_options: connect_options,
          thread_options: thread_options,
@@ -165,6 +168,33 @@ defmodule AgentHarness.Providers.Codex.Config do
        }}
     end
   end
+
+  # An exec option implies the exec client unless the caller picked one
+  # explicitly; without it the SDK subprocess client remains the default.
+  defp client(options, exec) do
+    fetch(options, :client, nil) ||
+      if exec, do: Client.Exec, else: Client.SDK
+  end
+
+  defp normalize_exec(nil), do: {:ok, nil}
+
+  defp normalize_exec({module, opts}) when is_atom(module) and is_list(opts),
+    do: {:ok, {module, opts}}
+
+  defp normalize_exec(module) when is_atom(module), do: {:ok, {module, []}}
+  defp normalize_exec(other), do: {:error, {:invalid_exec, other}}
+
+  defp validate_subscription_exec(_auth, nil), do: :ok
+  defp validate_subscription_exec(:inherit, _exec), do: :ok
+
+  # Subscription auth is verified against local Codex state (config layers,
+  # the auth.json store), which says nothing about the environment an exec
+  # would run the app-server in.
+  defp validate_subscription_exec(:subscription, _exec),
+    do: {:error, {:subscription_auth_conflict, :exec}}
+
+  defp put_exec(connect_options, nil), do: connect_options
+  defp put_exec(connect_options, exec), do: Keyword.put(connect_options, :exec, exec)
 
   @spec thread_options(prepared(), SessionConfig.t(), term()) :: map()
   def thread_options(prepared, %SessionConfig{} = config, connection) do

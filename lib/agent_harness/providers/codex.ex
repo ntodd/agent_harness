@@ -6,6 +6,12 @@ defmodule AgentHarness.Providers.Codex do
   default `:subscription` auth mode requires a local ChatGPT-backed Codex
   profile and suppresses API-key environment overrides; use `:inherit` only
   when API or custom environment authentication is intentional.
+
+  The app-server does not have to run locally: `provider_options:
+  %{exec: {module, opts}}` runs it through any `AgentHarness.Exec`
+  implementation (a remote sandbox, an SSH channel) while the JSON-RPC
+  protocol stays on this node. Remote execution requires `auth: :inherit`;
+  see `AgentHarness.Providers.Codex.ExecConnection`.
   """
 
   @behaviour AgentHarness.Provider

@@ -81,6 +81,12 @@ $ mix test \
     --include live
 ```
 
+Each provider also has an exec live test
+(`claude_exec_adapter_live_test.exs`, `codex_client_exec_live_test.exs`,
+`pi_client_exec_live_test.exs`) that runs the real CLI through
+`AgentHarness.Exec.Local`. These require `auth: :inherit`, so they use the
+local environment's saved authentication or an exported API key.
+
 Before running it:
 
 ```console

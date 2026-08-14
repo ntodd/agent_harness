@@ -1,10 +1,11 @@
 defmodule AgentHarness do
   @moduledoc """
-  Supervised logical sessions for locally installed coding-agent harnesses.
+  Supervised logical sessions for coding-agent harnesses.
 
   A session has a stable `AgentHarness.SessionRef` and one active turn at a
   time. Provider adapters own the external CLI lifecycle and publish normalized
-  events through the session.
+  events through the session. The CLI runs locally by default; each provider
+  can run it in another execution environment through `AgentHarness.Exec`.
   """
 
   alias AgentHarness.{
@@ -27,7 +28,7 @@ defmodule AgentHarness do
   @doc """
   Starts a supervised logical session for `provider`.
 
-  Authentication remains the responsibility of the locally installed CLI.
+  Authentication remains the responsibility of the CLI's own environment.
   Provider opening and initial Store finalization have separate bounded phases
   (`:startup_timeout` and `:startup_finalization_timeout`). Independent session
   handshakes are not serialized; call from a supervised task when the caller

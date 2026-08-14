@@ -19,6 +19,17 @@ published a stable public API.
   the JSONL stream, and exec options are scrubbed from crash reports since
   they routinely carry sandbox credentials. Live-validated against the real
   CLI.
+- Remote execution for the Codex provider, completing exec parity across all
+  three harnesses. `AgentHarness.Providers.Codex.ExecConnection` runs
+  `codex app-server` through any `AgentHarness.Exec` implementation,
+  speaking the app-server's JSONL JSON-RPC protocol on the orchestrator
+  (initialize handshake, request/response correlation, notification fan-out,
+  server-initiated approval requests). It answers the same call contract as
+  the SDK's own connections, so threads, turns, approvals, and interrupts
+  flow through the ordinary `codex_sdk` code paths via `Client.Exec`.
+  Selected with `provider_options: %{exec: {module, opts}}` under
+  `auth: :inherit` only, with exec options scrubbed from crash reports.
+  Live-validated against the real CLI.
 - `AgentHarness.Exec`, a byte-level behaviour for running a command in some
   execution environment (spawn with argv/env/cwd, stream output, write stdin,
   force-kill), with `AgentHarness.Exec.Local` as the port-backed default.

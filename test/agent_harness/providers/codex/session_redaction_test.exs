@@ -77,6 +77,23 @@ defmodule AgentHarness.Providers.Codex.SessionRedactionTest do
     assert scrubbed.codex_options == "[REDACTED]"
   end
 
+  test "format_status scrubs exec options, which can carry sandbox credentials" do
+    session = SessionRef.new(:codex, id: "codex-redaction-exec")
+
+    config =
+      SessionConfig.new(session,
+        provider_options: %{
+          auth: :inherit,
+          exec: {AgentHarness.ExecMock, sandbox_token: @secret}
+        }
+      )
+
+    %{state: scrubbed} = Session.format_status(%{state: state(config, prepared(config))})
+
+    refute erlang_format(scrubbed) =~ @secret
+    assert scrubbed.prepared.connect_options[:exec] == "[REDACTED]"
+  end
+
   test "format_status scrubs the opening state" do
     sink = Sink.new(self())
     status = %{state: {:opening, config(), sink, self(), self()}}

@@ -392,6 +392,7 @@ Recognized layers:
 | `:codex_path`          | Executable override                                 |
 | `:codex_options`       | `Codex.Options` construction                        |
 | `:connect_options`     | App-server connection/initialization                |
+| `:exec`                | Remote execution (see below); requires `:inherit`   |
 | `:thread_options`      | New or resumed Codex thread                         |
 | `:turn_options`        | Every turn in this AgentHarness session             |
 | `:provider_session_id` | Resume a specific Codex thread                      |
@@ -425,6 +426,36 @@ AgentHarness.start_turn(session, "Analyze this failure",
 ```
 
 `id` and `metadata` remain AgentHarness options and are not sent to Codex.
+
+### Run the Codex app-server in another execution environment
+
+Setting `exec:` runs `codex app-server` through an `AgentHarness.Exec`
+implementation instead of the SDK's subprocess transport. The app-server's
+JSON-RPC protocol — the initialize handshake, threads, turns, approvals,
+interrupts — stays in your application's node; only the CLI process moves.
+
+```elixir
+{:ok, session} =
+  AgentHarness.start_session(:codex,
+    cwd: "/workspace",
+    provider_options: %{
+      auth: :inherit,
+      exec: {MyApp.SandboxExec, sandbox: sandbox},
+      codex_path: "codex"
+    }
+  )
+```
+
+Remote execution requires `auth: :inherit` because `:subscription` verifies
+local Codex state (config layers, the credential store) that says nothing
+about the environment the app-server would run in. The spawn spec is
+remote-safe: `codex_path` and `cwd` resolve in the execution environment, and
+the process environment is built only from the SDK credential overrides and
+the session `env`. Model routing config (`model_payload`) is not translated
+into app-server flags; set the model per session or per thread instead.
+
+As with the Claude exec adapter, transport loss fails the turn and retires
+the session, and `skills:` paths must exist where the CLI runs.
 
 ### Resume a Codex conversation
 
@@ -732,6 +763,7 @@ The protocol support is in place for when a public API lands.
 | Approval/sandbox config | Common session fields                                                                  | Common fields with Claude-native values    | Rejected; pi does not sandbox                 |
 | Steering                | Capability currently unsupported                                                       | Capability currently unsupported           | Supported by pi, not yet exposed by the harness |
 | Terminal signal         | Codex terminal turn event                                                              | Claude `ResultMessage`                     | Non-retrying `agent_end` (`agent_settled` on older CLIs) |
+| Remote execution        | `exec:` provider option                                                                | `adapter:` with the Exec adapter           | `exec:` provider option                       |
 
 Provider-specific event data remains available in `Event.raw`. Write your
 orchestrator against normalized lifecycle and request events, then inspect
